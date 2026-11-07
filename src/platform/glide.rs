@@ -268,6 +268,16 @@ fn size_buffer(gl: &glow::Context, (fbo, t): (glow::Framebuffer, glow::Texture),
 /// for all of them.
 static GLIDE: Mutex<Option<Glide>> = Mutex::new(None);
 
+/// The TMU's memory between grSstWinClose and the next grSstWinOpen.
+struct Kept {
+    array: glow::Texture,
+    alpha: glow::Texture,
+    textures: BTreeMap<u32, Texture>,
+    palette: [u32; 256],
+}
+
+static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+
 /// GL objects contexts do not share (framebuffers, vertex arrays), made for each thread that
 /// draws.
 struct Local {
@@ -647,8 +657,13 @@ impl Glide {
                 gl.tex_storage_3d(glow::TEXTURE_2D_ARRAY, LEVELS, format, 256, 256, LAYERS as i32);
                 t
             };
-            let array = layers(glow::RGBA8);
-            let alpha = layers(glow::RG8);
+            // the TMU's memory from before a grSstWinClose: the card keeps it, and the game
+            // draws in a mission with textures it downloaded in the menu
+            let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let (array, alpha, textures, palette) = match kept {
+                Some(k) => (k.array, k.alpha, k.textures, k.palette),
+                None => (layers(glow::RGBA8), layers(glow::RG8), BTreeMap::new(), [0; 256]),
+            };
             let mut g = Glide {
                 res: (w, h),
                 target,
@@ -662,10 +677,10 @@ impl Glide {
                 locals: HashMap::new(),
                 array,
                 alpha,
-                stale: 0,
+                stale: textures.values().fold(0, |m, t| m | 1 << t.layer),
                 aniso: 0.0,
                 aniso_max,
-                textures: BTreeMap::new(),
+                textures,
                 downloads: 0,
                 cc: [1, 0, 0, 0, 0],
                 ac: [1, 0, 0, 0, 0],
@@ -684,7 +699,7 @@ impl Glide {
                 batch: Vec::new(),
                 batch_mode: glow::TRIANGLES,
                 gamma: 1.0,
-                palette: [0; 256],
+                palette,
                 front: texture(gl, true),
                 aux: texture(gl, true),
                 copy_prog: compile(gl, COPY_VS, COPY_FS),
@@ -1402,9 +1417,12 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         if let Some((rb, _)) = g.ms.take() {
             gl.delete_renderbuffer(rb);
         }
-        for t in [g.color, g.front, g.aux, g.array, g.alpha] {
+        for t in [g.color, g.front, g.aux] {
             gl.delete_texture(t);
         }
+        // the TMU's memory stays (see `open`)
+        *KEPT.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Kept { array: g.array, alpha: g.alpha, textures: std::mem::take(&mut g.textures), palette: g.palette });
         for sv in g.saved.drain(..) {
             gl.delete_texture(sv.tex);
         }
@@ -1429,6 +1447,8 @@ fn buffer_clear(c: &mut Cpu) -> u32 {
             gl.clear_color(ch(16), ch(8), ch(0), 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
             gl.disable(glow::SCISSOR_TEST);
+            // another thread may draw next (see `with`)
+            gl.flush();
         }
     });
     0
@@ -1464,6 +1484,10 @@ fn buffer_swap(c: &mut Cpu) -> u32 {
             let ms = g.rb_fbo(gl, rb);
             g.copy(gl, g.color, [0.0, 0.0, 1.0, 1.0], ms, [0, 0, w, h]);
         }
+        // the frame's commands to the GPU: another thread may draw the next one (the text
+        // before a mission); unflushed, this thread's last movie frame landed in a buffer
+        // after that thread had cleared it, and flickered under the text
+        unsafe { gl.flush() };
         (g.front, g.target, g.gamma)
     });
     if let Some((tex, (w, h), gamma)) = shown {

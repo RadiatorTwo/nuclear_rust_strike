@@ -60,6 +60,10 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       128x128 tile; the cursor's background read back from the GPU every frame); swaps paced
       to 60 Hz as the card's retrace; Sleep(0) with another guest thread running sleeps 1 ms
       (the message loop took the turn back ~800 000 times a second)
+- [x] TMU memory kept over grSstWinClose/grSstWinOpen (the game reopens at 800x600 for a
+      mission and uses textures from the menu: white HUD digits and radar marks)
+- [x] The last movie frame flickering under the text before a mission: a thread's commands
+      are flushed at grBufferSwap and grBufferClear before another thread draws
 - [x] Glide from more than one thread: the text before and after a mission is drawn by
       another thread (it was invisible: 8 s of "loading"); a wrong palette from it may have
       been the garbled Config text. Textures are clamped to the primitive's rectangle (marks

@@ -100,7 +100,9 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `show_texture` from there hands the texture over with a fence (`SHOW`). The game draws from
   two threads (the game's, and `trantext` for the text before and after a mission): Glide's
   state is global (`GLIDE` mutex); what contexts do not share (framebuffers, VAOs) is made
-  per thread (`Local`), and with two threads every call ends with glFlush. The game's Glide
+  per thread (`Local`), and with two threads every call ends with glFlush (swaps and clears always do). The TMU's
+  memory (texture arrays, textures, palette) outlives grSstWinClose (`KEPT`), as on the card.
+  `NSTRIKE_SHOT_MS` sets the picture interval of NSTRIKE_SHOT. The game's Glide
   layer is `gl_*` (0x478cc8...): `gl_ScaledTransferToLFB_` draws 16-bit pictures (movies,
   menu backgrounds) as 128x128 tiles, `gl_CopyBitmap_` saves what is under the cursor with
   grLfbReadRegion (hooked: the save is kept on the GPU and drawn back from there, flags 7 save,
