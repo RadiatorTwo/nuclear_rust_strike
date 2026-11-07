@@ -68,6 +68,10 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   steps** (Watcom's XI/YI start-up tables have 6-byte entries).
 - `lift.rs`: segment registers in mov/push/pop read as flat selectors (CS 0x1b, FS 0x3b,
   GS 0, else 0x23), writes are dropped (Watcom's start-up, `push ds; pop es`).
+- Division by zero does not stop the game: the event handler logs it once per address and the
+  division goes on by 1 (the PlayStation's does not trap; matRotTransPers_ 0x413e16 divides
+  by a point's depth, exactly 0 at times: a crash seen 2026-11-07). The default `rt` handler
+  (tests) still dies.
 - `discover.rs` also takes 32-bit immediates pointing at not yet decoded code as entries
   (`push offset thread_proc`), and `jmp cs:[reg + table]` (reg = index*4) as jump tables.
 - `image.rs`: a section with raw offset 0 (Watcom's .bss) is uninitialised: zeros.
@@ -87,15 +91,36 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   are threads calling `callback(user)`; MIDI messages are dropped (`NSTRIKE_MIDI_LOG=1`).
   Without Miles the game stops: "Unable to initialize audio system". `NSTRIKE_AIL_LOG=1`.
 - `dsound.rs`: the primary buffer reports 64 KB (the movie player sizes its buffer by it).
-- `frames.rs` (new): frame rate and the game's clock. sysUpdateTick_ (0x4823d0) is hooked: the
-  clock in µs (the game's `clock_` is GetTickCount/10: 10 ms steps made 60 fps frames move the
-  world by 10 or 20 ms in turn), read at the time the frame is due (`pace`), so steady frames
-  get steady steps. `[0x4ed72c]` (1/(60*256) s) drives physics and AI by elapsed time:
-  helicopter speed is the same at 60, 144 and ~350 fps. `[0x4ed720]` (whole 1/60 s) drives the
-  camera's smoothing: StrkCam_Update_, Slerp_, Rlerp_ hooked to step by the fraction too.
-  `[0x54d914]` may be 0 (the original's minimum 1 ran menu movies fast above 100 fps). The pace
-  at grBufferSwap: the display's refresh rate (`window::refresh_mhz`), or `NSTRIKE_FRAMERATE`
-  (0 unlimited). `NSTRIKE_FPS=1` logs frames a second and the slowest frame.
+- `frames.rs` (new): the game's clock (sysUpdateTick_ 0x4823d0 hooked, µs). In a mission the
+  logic runs 60 frames a second whatever the display (2026-11-07): much of it counts frames,
+  not time (above 60 fps explosions never ended, missiles left a trail piece a frame, the
+  hook's pick-up took the controls for good). The mission loop 0x46be9c waits at the start
+  of each frame (its sysUpdateTick_ calls, return 0x46bfc8 / 0x46c2f1) until it is due; its
+  clock goes on by exactly 1/60 s (`logic_frame_us`). Menus: paced at grBufferSwap
+  (display's refresh rate or `frame_rate`). `NSTRIKE_FPS=1` logs frames a second.
+- `pictures.rs` (new): pictures between logic frames, as
+  future_rust_cop's `fps.rs`. Each picture shows the game a frame late, interpolated between
+  the last two logic frames: the camera (StrkCam_Update_ hooked: position [0x503f54], angles
+  [0x503f64]; the matrices made with Camera_SetYPR_, the sun with Actor3D_UpdateSun_) is
+  swapped in only while drawing (Rndr_TerrainRender_, ObjMgr's draw callback 0x42c018,
+  Actor3D_DrawDeathDot_, HUDUserDraw_ hooked); an object (+0x2c position, +0x38 matrix 3x3
+  i16; children [+8], next [+0xc]) only while 0x42c018 draws it. ObjMgr_ProcessAllObj_: per
+  visible tile 0x42c000 moves (Obj_Process_), 0x42c018 draws. In the wait before the next
+  logic frame the loop's drawing runs alone (`picture`: disp_FrameChange_ with the loop's
+  argument, terrain, the visible tiles' and the high-rate list's objects, HUD,
+  Order_DrawOT_); afterwards the static data (0x4d0000..0x56c200) and the drawn objects'
+  memory are put back (not SSMem's heap lists 0x4e8454.., 0x51d990..: their records live
+  elsewhere, putting them back broke the heap); the terrain draws from its data as before the
+  frame's own drawing. While a picture draws, the game thread keeps the turn (`hold_turn`:
+  the audio timer's changes were undone, sounds went missing). `NSTRIKE_FPS=1` also logs
+  pictures a second and their swap/draw times.
+- The chopper's autopilot (flynVehiIntrBehavior_ 0x4251dc, the hook pick-up flies it over the
+  load) steps by time / 0x114 with the rest dropped: at 60 frames (256) no step ever, the
+  controls stayed taken. `frames::autopilot` carries the rest. `NSTRIKE_CTRL_LOG=1` logs
+  controller contexts, the hook's states (0x41ec8c) and the player's pick-up fields.
+- A test run into the first mission: `NSTRIKE_INPUT="500:focus 4000:Enter 7000:Enter
+  10000:Enter 25000:Enter 30000:Enter 35000:Enter"` (key names are case-sensitive: `Enter`,
+  `Up`, `Left`; unknown ones are logged), flying from ~45 s.
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
   word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's
@@ -141,6 +166,12 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   menu backgrounds) as 128x128 tiles, `gl_CopyBitmap_` saves what is under the cursor with
   grLfbReadRegion (hooked: the save is kept on the GPU and drawn back from there, flags 7 save,
   6 restore, 0xa the cursor itself), `gl_SetTMUPaletteRange_` the palette. `NSTRIKE_GLIDE_LOG=1` logs downloads.
+- `src/settings.rs` (new): the port's settings in `game_files/nstrike.toml` (`key = value`,
+  written whole with comments at the first start and on every change: `update`); wrong values
+  keep the default and are reported. `get()` = the file with `NSTRIKE_WINDOW`,
+  `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER` over it (not
+  saved). The game's own settings stay in its Config menu / nukepc.sav. Plan: an overlay menu
+  of ours for these; the game's menu is not extended, except for what it has (resolution).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

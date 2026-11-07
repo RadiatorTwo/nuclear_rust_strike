@@ -79,10 +79,19 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       0x475314: dumps with NSTRIKE_DUMP)
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
+- [x] Mission logic at a fixed 60 frames a second (`frames.rs`); pictures in between at the
+      display's rate, objects and camera interpolated (`pictures.rs`, as future_rust_cop's
+      `fps.rs`); hook pick-up autopilot fixed for 60 frames
+- [ ] recomp_kit: the generic part of fixed logic rate + pictures between frames, GUIDE section
+- [x] Settings file `game_files/nstrike.toml` (`settings.rs`): window, fullscreen (Alt+Enter
+      saves it), frame rate, MSAA, texture filter; `NSTRIKE_*` override for one run
+- [ ] Overlay menu (our own, drawn in GL over the game, opened by a key) for the port's
+      settings. Decided: the game's Config menu is not extended, except for what it has
+      already (the resolution): such settings in both places
 
 ### 4. Later
 - [ ] Videos (`videos.res`: format unknown yet)
-- [ ] Gamepads, preferences, fullscreen, Linux
+- [ ] Gamepads, Linux
 - [ ] Unsupported instructions in discovered code (Aas 204, Iretd 15, Les 6, ...): mostly data
       decoded as code? Check which functions they are in, and whether any runs
 - [ ] Differential test against Unicorn (future_rust_cop's `src/bin/difftest.rs`)

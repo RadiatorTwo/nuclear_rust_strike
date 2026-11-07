@@ -400,3 +400,118 @@ static DEVICE: &[Import] = &[
 ];
 
 pub const IMPORTS: &[Import] = &[("DirectInputCreateA", 4, direct_input_create)];
+
+// ---- the game's controller layer (for the log) --------------------------------------------------
+
+/// Controller_AttachContext_ and Controller_DetachContext_ (eax controller, edx context): the
+/// game hands its input to a context (playing, a message box, a scripted scene) and takes it
+/// back. `NSTRIKE_CTRL_LOG=1` logs each change and its caller.
+pub const ATTACH_CONTEXT: u32 = 0x446878;
+pub const DETACH_CONTEXT: u32 = 0x446908;
+/// chopSendHookUp_ (eax chopper): the hook is sent down or up.
+pub const SEND_HOOK_UP: u32 = 0x41eba0;
+
+fn ctrl_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NSTRIKE_CTRL_LOG").is_some_and(|v| v != "0"))
+}
+
+fn ctrl_note(c: &Cpu, what: &str) {
+    if ctrl_log() {
+        let m = mem();
+        let ret = m.rd32(c.r[crate::rt::ESP]);
+        log!(
+            "ctrl: {what}(controller {:#x}, {:#x}) from {} (mission time {})",
+            c.r[crate::rt::EAX],
+            c.r[crate::rt::EDX],
+            crate::image::named(ret),
+            m.rd32(0x4ed720)
+        );
+    }
+}
+
+pub fn attach_context(c: &mut Cpu) {
+    ctrl_note(c, "AttachContext");
+    crate::rt::call_original(c, ATTACH_CONTEXT);
+}
+
+pub fn detach_context(c: &mut Cpu) {
+    ctrl_note(c, "DetachContext");
+    crate::rt::call_original(c, DETACH_CONTEXT);
+}
+
+pub fn send_hook_up(c: &mut Cpu) {
+    if ctrl_log() {
+        let state = (mem().rd32(c.r[crate::rt::EAX] + 0x1c3) >> 6) & 7;
+        ctrl_note(c, &format!("chopSendHookUp (hook state {state})"));
+    }
+    crate::rt::call_original(c, SEND_HOOK_UP);
+}
+
+/// 0x41ec8c (eax chopper): the hook's states, called by the chopper's logic. With
+/// `NSTRIKE_CTRL_LOG=1` every change of its state word `[+0x1c3]` and deadline `[+0x1b7]`
+/// is logged with the time (`[0x4ed72c]`).
+pub const HOOK_STATES: u32 = 0x41ec8c;
+
+pub fn hook_states(c: &mut Cpu) {
+    if !ctrl_log() {
+        return crate::rt::call_original(c, HOOK_STATES);
+    }
+    let m = mem();
+    let o = c.r[crate::rt::EAX];
+    let before = (m.rd32(o + 0x1c3), m.rd32(o + 0x1b7), m.rd32(o + 0x187));
+    crate::rt::call_original(c, HOOK_STATES);
+    let after = (m.rd32(o + 0x1c3), m.rd32(o + 0x1b7), m.rd32(o + 0x187));
+    if before != after {
+        log!(
+            "hook: state {:#010x} -> {:#010x} (bits 6-8: {} -> {}), deadline {:#x} -> {:#x}, load {:#x} -> {:#x}, now {:#x}",
+            before.0,
+            after.0,
+            (before.0 >> 6) & 7,
+            (after.0 >> 6) & 7,
+            before.1,
+            after.1,
+            before.2,
+            after.2,
+            m.rd32(0x4ed72c)
+        );
+    }
+}
+
+/// With `NSTRIKE_CTRL_LOG=1`, at every mission frame: the player's pick-up fields when they
+/// change (control flags `[+0x157]`, landing mode `[+0x15b] & 0x7000` and state `[+0x15c]`,
+/// pick-up phase `[+0x193] & 7`, hook state `[+0x1c3]`, load `[+0x187]`, the place aimed at
+/// `[+0x167]`/`[+0x16b]`/height `[+0x163]` and the chopper's own `[+0x2c]`/`[+0x30]`/`[+0x34]`).
+pub fn watch_player() {
+    if !ctrl_log() {
+        return;
+    }
+    static LAST: std::sync::Mutex<Option<[u32; 6]>> = std::sync::Mutex::new(None);
+    let m = mem();
+    let p = m.rd32(0x4e7ee0);
+    if p == 0 {
+        return;
+    }
+    let now = [m.rd8(p + 0x157) as u32, m.rd32(p + 0x15b) & 0x7000, m.rd8(p + 0x15c) as u32, m.rd8(p + 0x193) as u32 & 7, m.rd32(p + 0x1c3), m.rd32(p + 0x187)];
+    let mut last = LAST.lock().unwrap();
+    if *last != Some(now) {
+        *last = Some(now);
+        let rd = |o| m.rd32(p + o) as i32;
+        log!(
+            "player: flags157 {:#04x} mode {:#06x} state15c {:#04x} phase {} hook {:#010x} load {:#x}; aim {},{} h {}; at {},{},{} t {:#x}",
+            now[0],
+            now[1],
+            now[2],
+            now[3],
+            now[4],
+            now[5],
+            rd(0x167),
+            rd(0x16b),
+            rd(0x163),
+            rd(0x2c),
+            rd(0x30),
+            rd(0x34),
+            m.rd32(0x4ed72c)
+        );
+    }
+}

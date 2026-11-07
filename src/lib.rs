@@ -12,5 +12,6 @@ pub mod jit;
 pub mod lift;
 pub mod platform;
 pub mod rt;
+pub mod settings;
 pub mod setup;
 pub mod smc;

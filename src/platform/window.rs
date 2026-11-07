@@ -662,15 +662,14 @@ impl App {
 
     fn create(&mut self, el: &ActiveEventLoop) {
         let Some(title) = self.want.take() else { return };
-        // NSTRIKE_WINDOW=1920x1080: the window's starting size in pixels; else 1280x960
-        let size = std::env::var("NSTRIKE_WINDOW")
-            .ok()
-            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))));
+        // the settings' window size (NSTRIKE_WINDOW=1920x1080); else 1280x960 at the desktop's scale
+        let set = crate::settings::get();
         let attrs = Window::default_attributes().with_title(title);
-        let attrs = match size {
+        let attrs = match set.window {
             Some((w, h)) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
             None => attrs.with_inner_size(LogicalSize::new(1280.0, 960.0)),
         };
+        let attrs = attrs.with_fullscreen(set.fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
         let (win, gl) = Gl::new(el, attrs);
         // to the front, while our start window still has the foreground (Windows lets only the
         // foreground's process bring a window forward)
@@ -803,6 +802,7 @@ impl ApplicationHandler for App {
                         if let Some(w) = &self.window {
                             let full = w.fullscreen().is_some();
                             w.set_fullscreen((!full).then_some(winit::window::Fullscreen::Borderless(None)));
+                            crate::settings::update(|s| s.fullscreen = !full);
                         }
                     }
                     return;

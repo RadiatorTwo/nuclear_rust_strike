@@ -91,48 +91,25 @@ const LAYERS: u32 = 64;
 /// Levels of a 256x256 texture: 256 ... 1.
 const LEVELS: i32 = 9;
 
-/// Texture filtering when the game filters: 0 the original (bilinear, no mipmaps),
-/// 1 trilinear mipmaps, 2...16 also anisotropic.
-pub const FILTER_CHOICES: &[u32] = &[0, 1, 2, 4, 8, 16];
 static FILTER: AtomicU32 = AtomicU32::new(16);
-
-/// The saved choice (default: anisotropic 16x); `NSTRIKE_FILTER=<n>` overrides it.
-pub fn filtering() -> u32 {
-    if let Some(n) = std::env::var("NSTRIKE_FILTER").ok().and_then(|v| v.parse().ok()) {
-        return n;
-    }
-    let v = super::advapi32::value("", "TextureFilter").and_then(|(_, d)| Some(u32::from_le_bytes(d.get(..4)?.try_into().ok()?)));
-    v.filter(|v| FILTER_CHOICES.contains(v)).unwrap_or(16)
-}
-
-/// Multisample anti-aliasing: samples per pixel (0 off).
-pub const MSAA_CHOICES: &[u32] = &[0, 2, 4, 8];
 static MSAA: AtomicU32 = AtomicU32::new(4);
 
-/// The saved choice (REG_DWORD `Msaa`, default 4x); `NSTRIKE_MSAA=<n>` overrides it.
-pub fn msaa() -> u32 {
-    if let Some(n) = std::env::var("NSTRIKE_MSAA").ok().and_then(|v| v.parse().ok()) {
-        return n;
-    }
-    let v = super::advapi32::value("", "Msaa").and_then(|(_, d)| Some(u32::from_le_bytes(d.get(..4)?.try_into().ok()?)));
-    v.filter(|v| MSAA_CHOICES.contains(v)).unwrap_or(4)
+/// At start, after the EXE is loaded: the settings' MSAA and texture filtering.
+pub fn init() {
+    let s = crate::settings::get();
+    FILTER.store(s.texture_filter, Ordering::Relaxed);
+    MSAA.store(s.msaa, Ordering::Relaxed);
 }
 
-/// Preferences' OK: saved, and used from the next frame on.
+/// MSAA changed: saved, and used from the next frame on.
 pub fn set_msaa(n: u32) {
-    super::advapi32::set_value("", "Msaa", 4, &n.to_le_bytes());
+    crate::settings::update(|s| s.msaa = n);
     MSAA.store(n, Ordering::Relaxed);
 }
 
-/// At start, after the EXE is loaded.
-pub fn init() {
-    FILTER.store(filtering(), Ordering::Relaxed);
-    MSAA.store(msaa(), Ordering::Relaxed);
-}
-
-/// Preferences' OK: saved, and used from the next batch on.
+/// Texture filtering changed: saved, and used from the next batch on.
 pub fn set_filtering(n: u32) {
-    super::advapi32::set_value("", "TextureFilter", 4, &n.to_le_bytes());
+    crate::settings::update(|s| s.texture_filter = n);
     FILTER.store(n, Ordering::Relaxed);
 }
 

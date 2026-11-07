@@ -180,6 +180,7 @@ fn allocate_sample_handle(_: &mut Cpu) -> u32 {
 
 fn release_sample_handle(c: &mut Cpu) -> u32 {
     let h = arg(c, 0);
+    ail_log!("AIL_release_sample_handle({h:#x})");
     if SAMPLES.lock().unwrap().remove(&h).is_some() {
         super::dsound::sample_end(h);
         free(h);
@@ -266,9 +267,16 @@ fn start_sample(c: &mut Cpu) -> u32 {
         s.clone()
     });
     if let Some(s) = s {
+        ail_log!("AIL_start_sample({h:#x}): {} bytes at {:#x}, {} Hz, loops {}, volume {}; {} of {} playing", s.bytes, s.data, s.rate, s.loop_count, s.volume, playing(), SAMPLES.lock().unwrap().len());
         s.start(h);
     }
     0
+}
+
+/// Samples the mixer plays now (for the log).
+fn playing() -> usize {
+    let hs: Vec<u32> = SAMPLES.lock().unwrap().keys().copied().collect();
+    hs.into_iter().filter(|&h| super::dsound::sample_playing(h)).count()
 }
 
 /// AIL_stop_sample: paused where it is (AIL_resume_sample would go on).
@@ -280,6 +288,7 @@ fn stop_sample(c: &mut Cpu) -> u32 {
         }
     });
     super::dsound::sample_pause(h, true);
+    ail_log!("AIL_stop_sample({h:#x})");
     0
 }
 

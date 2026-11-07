@@ -17,6 +17,7 @@ pub mod glide;
 pub mod kernel32;
 pub mod miles;
 pub mod misc;
+pub mod pictures;
 pub mod sample;
 pub mod user32;
 pub mod window;
@@ -25,7 +26,7 @@ pub use crate::image::ResId;
 use crate::image::Image;
 use crate::rt::{self, Cpu, EAX, ESP, Event, Memory};
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
@@ -336,6 +337,19 @@ fn turn_give() {
     TURN.cv.notify_all();
 }
 
+/// Run host code that waits (a sleep) from a hook, with the turn handed over meanwhile.
+pub fn without_turn<R>(f: impl FnOnce() -> R) -> R {
+    let held = HELD.get();
+    if held {
+        turn_give();
+    }
+    let r = f();
+    if held {
+        turn_take();
+    }
+    r
+}
+
 /// Whether another guest thread runs or waits for the turn (asked by a thread without it).
 pub fn others_running() -> bool {
     let t = lock(&TURN.tickets);
@@ -376,9 +390,20 @@ fn slice_ticks() -> u64 {
     })
 }
 
+thread_local! {
+    /// This thread keeps the turn at loop heads (`hold_turn`).
+    static HOLD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Keep the turn at loop heads (true) until released (false): for guest code whose changes
+/// are put back afterwards (a picture between frames), so no other thread's change is lost.
+pub fn hold_turn(on: bool) {
+    HOLD.set(on);
+}
+
 /// At a loop head with another thread waiting: let it run first, after this thread's slice.
 fn turn_yield() {
-    if HELD.get() && tsc().wrapping_sub(TAKEN.get()) >= slice_ticks() {
+    if HELD.get() && !HOLD.get() && tsc().wrapping_sub(TAKEN.get()) >= slice_ticks() {
         turn_give();
         turn_take();
     }
@@ -482,7 +507,8 @@ fn on_event(c: &mut Cpu, e: Event) {
             // 400 000 Glide calls a second: handing the turn over at each made the game thread
             // wait for the others again and again. Those that never wait keep it, once the
             // thread has its GL context (getting it waits for the window's thread).
-            let keep = quick && window::gl_ready_here();
+            // `hold_turn`: all keep it (what another thread changed meanwhile would be undone)
+            let keep = (quick && window::gl_ready_here()) || HOLD.get();
             if !keep {
                 turn_give();
             }
@@ -498,7 +524,14 @@ fn on_event(c: &mut Cpu, e: Event) {
             c.r[ESP] += 4 + 4 * nargs.max(0) as u32;
         }
         Event::Foreign(a) => fatal(c, &format!("call to unknown address {a:#x}")),
-        Event::Trap(a, 0) => fatal(c, &format!("division by zero at {a:#x}")),
+        // the PlayStation's division by zero does not trap, and the port's code relies on it
+        // (a point at the camera's depth): reported once per place, then divided by 1
+        Event::Trap(a, 0) => {
+            static SEEN: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+            if SEEN.lock().unwrap().insert(a) {
+                log!("division by zero at {a:#x} ({}): divided by 1", crate::image::named(a));
+            }
+        }
         Event::Trap(a, _) => fatal(c, &format!("int3/hlt/ud2 at {a:#x}")),
         Event::Unimpl(a) => fatal(c, &format!("unsupported instruction at {a:#x}")),
     }
@@ -692,9 +725,17 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 /// Game functions replaced by our own (`jit::compile`).
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear), (glide::COPY_BITMAP, glide::copy_bitmap),
     (frames::UPDATE_TICK, frames::update_tick),
-    (frames::CAM_UPDATE, frames::cam_update),
-    (frames::SLERP, frames::slerp),
-    (frames::RLERP, frames::rlerp),
+    (frames::AUTOPILOT, frames::autopilot),
+    (dinput::ATTACH_CONTEXT, dinput::attach_context),
+    (dinput::DETACH_CONTEXT, dinput::detach_context),
+    (dinput::SEND_HOOK_UP, dinput::send_hook_up),
+    (dinput::HOOK_STATES, dinput::hook_states),
+    (pictures::CAM_UPDATE, pictures::cam_update),
+    (pictures::TERRAIN, pictures::terrain),
+    (pictures::DRAW_OBJ, pictures::draw_obj),
+    (pictures::DEATH_DOT, pictures::death_dot),
+    (pictures::HUD_DRAW, pictures::hud_draw),
+    (pictures::FRAME_CHANGE, pictures::frame_change),
 ];
 
 /// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector
@@ -752,7 +793,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     if let Ok(w) = std::env::var("NSTRIKE_WATCH") {
         // where the game is, every 2 s (for hangs); "NSTRIKE_WATCH=568b14,4eee50": also the
         // dwords at these addresses
-        let addrs: Vec<u32> = w.split(',').filter_map(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).ok()).collect();
+        let addrs: Vec<u32> = w.split(',').filter_map(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).ok()).filter(|&a| a >= 0x10000).collect();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             for &a in &addrs {

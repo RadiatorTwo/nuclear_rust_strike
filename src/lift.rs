@@ -1543,13 +1543,29 @@ impl<'a, 'f> Lifter<'a, 'f> {
     fn div(&mut self, i: &Instruction, signed: bool) {
         let n = op_size(i, 0);
         let d = self.rd(i, 0, n);
-        // division by zero: the game never relies on it, report it
+        // division by zero: the event handler reports it (and may stop); if it returns, the
+        // division goes on by 1. The game comes from the PlayStation, whose division by zero
+        // does not trap: its projection divides by a depth that can be exactly 0.
         let zero = self.b.ins().icmp_imm_u(IntCC::Equal, d, 0);
         let (bad, ok) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(zero, bad, &[], ok, &[]);
         self.b.switch_to_block(bad);
-        self.trap(i.ip32(), TRAP_DIV0);
+        // the registers for the report only: flags, TOP and the x87 cache stay as they are
+        for k in 0..8 {
+            let v = self.b.use_var(self.r[k]);
+            self.b.ins().store(mf(), v, self.cpu, (offset_of!(Cpu, r) + 4 * k) as i32);
+        }
+        let (a, k) = (self.iconst(I32, i.ip32() as i64), self.iconst(I32, TRAP_DIV0));
+        self.b.ins().call(self.refs.trap, &[self.cpu, a, k]);
+        // a handler that stops (the default one exits): return all the way out
+        let stop = self.b.ins().load(I32, mf(), self.cpu, offset_of!(Cpu, stop) as i32);
+        let out = self.b.create_block();
+        self.b.ins().brif(stop, out, &[], ok, &[]);
+        self.b.switch_to_block(out);
+        self.b.ins().return_(&[]);
         self.b.switch_to_block(ok);
+        let one = self.iconst(ty(n), 1);
+        let d = self.b.ins().select(zero, one, d);
         let (wide, half) = match n {
             1 => (I16, I8),
             2 => (I32, I16),
