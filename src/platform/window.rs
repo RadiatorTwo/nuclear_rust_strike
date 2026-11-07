@@ -83,7 +83,11 @@ pub fn hide_cursor(hidden: bool) {
 }
 
 fn on_main() -> bool {
-    *MAIN.get_or_init(|| std::thread::current().id()) == std::thread::current().id()
+    thread_local! {
+        // asked at every Glide call: thread::current() each time cost
+        static IS: bool = *MAIN.get_or_init(|| std::thread::current().id()) == std::thread::current().id();
+    }
+    IS.with(|m| *m)
 }
 
 fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
@@ -405,6 +409,11 @@ pub fn with_gl<R>(f: impl FnOnce(&glow::Context) -> R) -> Option<R> {
         }
         sh.as_ref().map(|s| f(&s.gl))
     })
+}
+
+/// Does this thread have its GL context already (the window's, or one sharing it)?
+pub fn gl_ready_here() -> bool {
+    on_main() || SHARED.with_borrow(|s| s.is_some())
 }
 
 /// Show a texture something rendered (first row at the bottom), w x h, with a gamma. From

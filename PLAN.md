@@ -71,6 +71,8 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 - [x] Frame rate unlocked: paced at the display's refresh rate (`NSTRIKE_FRAMERATE`), the
       game's clock in µs at the frame's due time (it moved in 10 ms steps: shaking at 60 fps),
       the camera's smoothing by fractions of 1/60 s. Physics checked: same speed at any rate
+- [x] Speed: x87 24-bit rounding inline, dense call lookup, fewer turn hand-overs (~+25%)
+- [ ] Speed: x87 stack kept in Cranelift values within a block (fxch/fld/fstp without memory)
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
 

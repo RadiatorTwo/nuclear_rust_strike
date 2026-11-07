@@ -96,6 +96,20 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `[0x54d914]` may be 0 (the original's minimum 1 ran menu movies fast above 100 fps). The pace
   at grBufferSwap: the display's refresh rate (`window::refresh_mhz`), or `NSTRIKE_FRAMERATE`
   (0 unlimited). `NSTRIKE_FPS=1` logs frames a second and the slowest frame.
+- Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
+  word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
+  double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's
+  sign from TwoSum/fma decides); only other modes, subnormals and infinities call
+  `rt_fpu_round` (it took 24% of the game thread). `tests/x87.rs` `x87_precision` checks it
+  against `rt_fpu_round`. `rt_lookup` (indirect calls) reads a dense table over the code;
+  thunk addresses miss at once. Glide imports that never wait keep the turn (`SLOW_GLIDE`
+  lists those that give it up). A thread keeps the turn at loop heads for `SLICE` (0.5 ms,
+  `tsc`): the game and controller threads traded it 60 000 times a second.
+  `NSTRIKE_SAMPLE=1` (`sample.rs`): a sampling profiler of the game thread (function or host
+  module, every 2 s; `NSTRIKE_SAMPLE_RAW=<file>` all samples, our own code as `nstrike.exe+off`:
+  symbolise with a build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and
+  llvm-symbolizer). Left: the projection routines (vec3fp16_Project*ListASM_, x87 with the
+  stack in memory) ~22%.
 - `rt_yield(cpu, loop head)`: `NSTRIKE_WATCH=` logs the last loop head a spinning thread
   yielded at, `NSTRIKE_WATCH=568b14,...` also dwords of guest memory, every 2 s.
 - Fault reports name the nearest compiled function below the host address: a hooked
@@ -121,7 +135,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.
 - Environment variables are `NSTRIKE_*` (Future Cop's `FCOP_*`): `NSTRIKE_TRACE_API` (`1`
   every import, else those whose name contains the value: `NSTRIKE_TRACE_API=glide2x`),
-  `NSTRIKE_PROF`, `NSTRIKE_FPS`, `NSTRIKE_FRAMERATE`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
+  `NSTRIKE_PROF`, `NSTRIKE_SAMPLE`, `NSTRIKE_FPS`, `NSTRIKE_FRAMERATE`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
   (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT` (`move@x,y` also moves
   DirectInput's mouse; with it set the window does not catch the mouse or take the foreground), `NSTRIKE_WINDOW`.
 

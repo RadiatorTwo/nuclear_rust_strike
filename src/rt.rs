@@ -152,6 +152,8 @@ impl Memory {
 /// trampoline the host enters guest code through.
 pub struct Dispatch {
     pub table: Vec<(u32, usize)>,
+    /// the same for the game's code, by address - TEXT_START (0: none): a lookup is one load
+    pub dense: Vec<usize>,
     pub foreign_stub: usize,
     pub enter: extern "C" fn(*mut Cpu, *const u8),
     /// hooked functions (sorted): the host function and the recompiled original
@@ -169,11 +171,33 @@ fn die(msg: String) -> ! {
     std::process::exit(101)
 }
 
+impl Dispatch {
+    /// `dense` for a table: every function in the game's code.
+    pub fn dense(table: &[(u32, usize)]) -> Vec<usize> {
+        use crate::discover::{TEXT_END, TEXT_START};
+        let mut d = vec![0; (TEXT_END - TEXT_START) as usize];
+        for &(a, p) in table {
+            if (TEXT_START..TEXT_END).contains(&a) {
+                d[(a - TEXT_START) as usize] = p;
+            }
+        }
+        d
+    }
+}
+
 /// The function to run for a guest address: a recompiled function, or the foreign stub,
 /// which passes the address on to `rt_foreign`.
 pub extern "C" fn rt_lookup(cpu: *mut Cpu, addr: u32) -> *const u8 {
     let d = DISPATCH.get().expect("dispatch table not set");
-    match d.table.binary_search_by_key(&addr, |e| e.0) {
+    if let Some(&p) = d.dense.get(addr.wrapping_sub(crate::discover::TEXT_START) as usize) {
+        if p != 0 {
+            return p as *const u8;
+        }
+    }
+    // the imports' thunks (Glide's 1.2 million calls a second come through pointers) lie
+    // above every function
+    let found = if d.table.last().is_some_and(|l| addr > l.0) { Err(0) } else { d.table.binary_search_by_key(&addr, |e| e.0) };
+    match found {
         Ok(k) => d.table[k].1 as *const u8,
         Err(_) => {
             unsafe { (*cpu).foreign = addr };
@@ -662,7 +686,7 @@ pub extern "C" fn rt_fpu_round(op: u32, x: f64, y: f64, cw: u32) -> f64 {
             }
         }
         _ => {
-            let mid = (lo + hi) / 2.0;
+            let mid = lo / 2.0 + hi / 2.0; // (lo + hi) / 2 overflows near the largest doubles
             if s < mid || (s == mid && err < 0) {
                 lo
             } else if s > mid || err > 0 {
@@ -681,7 +705,9 @@ pub extern "C" fn rt_fpu_round(op: u32, x: f64, y: f64, cw: u32) -> f64 {
 fn floor24(s: f64, err: i32) -> f64 {
     let floor = |v: f64| {
         let exp = ((v.to_bits() >> 52) & 0x7ff) as i64 - 1023;
-        let unit = f64::from_bits(((exp - 23 + 1023).max(1) as u64) << 52);
+        // 2^(exp - 23); below 2^-1022 a subnormal
+        let e = (exp - 23).max(-1074);
+        let unit = if e >= -1022 { f64::from_bits(((e + 1023) as u64) << 52) } else { f64::from_bits(1 << (e + 1074)) };
         (v / unit).floor() * unit
     };
     // s itself representable but the exact value just below it: the 24-bit float below s

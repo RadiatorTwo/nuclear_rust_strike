@@ -164,8 +164,8 @@ impl Lifter<'_, '_> {
     }
 
     /// x op y as the FPU rounds it. Doubles to nearest when the control word asks for 53
-    /// or 64 bits to nearest; anything else (the renderer's 24 bits, truncating) goes to
-    /// `rt_fpu_round`.
+    /// or 64 bits to nearest. 24 bits to nearest or truncating (the renderer's 0xc7f) are
+    /// done here too (`round24`); anything else goes to `rt_fpu_round`.
     fn arith(&mut self, op: FpuOp, x: Value, y: Value) -> Value {
         let fast = match op {
             FpuOp::Add => self.b.ins().fadd(x, y),
@@ -175,22 +175,130 @@ impl Lifter<'_, '_> {
             FpuOp::Sqrt => self.b.ins().sqrt(x),
             FpuOp::Round => self.b.ins().fdemote(F32, x),
         };
+        // the double nearest the exact result (for a store: x itself)
+        let s = if matches!(op, FpuOp::Round) { x } else { fast };
         let fast = if matches!(op, FpuOp::Round) { self.b.ins().fpromote(F64, fast) } else { fast };
         let cw = self.b.ins().load(I16, mf(), self.cpu, offset_of!(Cpu, fcw) as i32);
         let cw = self.b.ins().uextend(I32, cw);
         // rounding control 00 (to nearest) and precision control 1x (53 or 64 bits)
         let mode = self.b.ins().band_imm_u(cw, 0xe00);
         let usual = self.b.ins().icmp_imm_u(IntCC::Equal, mode, 0x200);
-        let (slow, done) = (self.b.create_block(), self.b.create_block());
+        let (slow, call_blk, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.append_block_param(done, F64);
         self.b.ins().brif(usual, done, &[fast.into()], slow, &[]);
         self.b.switch_to_block(slow);
+        let (ok, r) = self.round24(op, x, y, s, cw);
+        self.b.ins().brif(ok, done, &[r.into()], call_blk, &[]);
+        self.b.switch_to_block(call_blk);
         let o = self.iconst(I32, op as i64);
         let call = self.b.ins().call(self.refs.fpu_round, &[o, x, y, cw]);
         let r = self.b.inst_results(call)[0];
         self.b.ins().jump(done, &[r.into()]);
         self.b.switch_to_block(done);
         self.b.block_params(done)[0]
+    }
+
+    /// x op y rounded to 24 bits, to nearest or truncating, from s (the double nearest the
+    /// exact result) and the sign of s's error: (done, the result). Not done: another control
+    /// word, a subnormal, zero with an error, infinite or NaN (left to `rt_fpu_round`).
+    /// The exact result and s lie on the same side of every 24-bit number and of every middle
+    /// between two, unless s is one of them (its low 29 bits 0, or 0x10000000): then the
+    /// error's sign decides. Mostly the game's results are 24-bit numbers themselves.
+    fn round24(&mut self, op: FpuOp, x: Value, y: Value, s: Value, cw: Value) -> (Value, Value) {
+        const UNIT: i64 = 1 << 29;
+        const HALF: i64 = 1 << 28;
+        // the error e = exact - s (its sign is all that counts)
+        let e = match op {
+            FpuOp::Add | FpuOp::Sub => {
+                // TwoSum
+                let y = if matches!(op, FpuOp::Sub) { self.b.ins().fneg(y) } else { y };
+                let b = self.b.ins().fsub(s, x);
+                let sb = self.b.ins().fsub(s, b);
+                let ex = self.b.ins().fsub(x, sb);
+                let ey = self.b.ins().fsub(y, b);
+                self.b.ins().fadd(ex, ey)
+            }
+            FpuOp::Mul => {
+                let ns = self.b.ins().fneg(s);
+                self.b.ins().fma(x, y, ns)
+            }
+            FpuOp::Div => {
+                // x - s*y; the quotient's error has its sign times y's
+                let ns = self.b.ins().fneg(s);
+                let r = self.b.ins().fma(ns, y, x);
+                let rb = self.b.ins().bitcast(I64, mf(), r);
+                let yb = self.b.ins().bitcast(I64, mf(), y);
+                let ys = self.b.ins().band_imm_u(yb, i64::MIN);
+                let eb = self.b.ins().bxor(rb, ys);
+                self.b.ins().bitcast(F64, mf(), eb)
+            }
+            FpuOp::Sqrt => {
+                let ns = self.b.ins().fneg(s);
+                self.b.ins().fma(ns, s, x)
+            }
+            FpuOp::Round => self.b.ins().f64const(0.0),
+        };
+        let fzero = self.b.ins().f64const(0.0);
+        let exact = self.b.ins().fcmp(FloatCC::Equal, e, fzero);
+        let bits = self.b.ins().bitcast(I64, mf(), s);
+        let eb = self.b.ins().bitcast(I64, mf(), e);
+        // e has the sign of s: the exact result is farther from zero
+        let signs = self.b.ins().bxor(bits, eb);
+        let away = self.b.ins().icmp_imm_u(IntCC::SignedGreaterThanOrEqual, signs, 0);
+        let pcrc = self.b.ins().band_imm_u(cw, 0xf00);
+        let trunc = self.b.ins().icmp_imm_u(IntCC::Equal, pcrc, 0xc00);
+        let near = self.b.ins().icmp_imm_u(IntCC::Equal, pcrc, 0);
+        let low = self.b.ins().band_imm_u(bits, UNIT - 1);
+        let on = self.b.ins().icmp_imm_u(IntCC::Equal, low, 0);
+        let mid = self.b.ins().icmp_imm_u(IntCC::Equal, low, HALF);
+        let lo = self.b.ins().band_imm_u(bits, !(UNIT - 1));
+        let hi = self.b.ins().iadd_imm_s(lo, UNIT);
+        // s between two 24-bit numbers: to nearest the nearer one, truncating the lower
+        let up = self.b.ins().iadd_imm_s(bits, HALF);
+        let up = self.b.ins().band_imm_u(up, !(UNIT - 1));
+        let between = self.b.ins().select(near, up, lo);
+        // s on a 24-bit number: itself, or truncating the one below if the exact result is
+        // nearer zero
+        let keep = self.b.ins().bor(near, exact);
+        let keep = self.b.ins().bor(keep, away);
+        let below = self.b.ins().iadd_imm_s(bits, -UNIT);
+        let on_r = self.b.ins().select(keep, bits, below);
+        // s in the middle, to nearest: by the error, a tie to the even one
+        let odd = self.b.ins().band_imm_u(lo, UNIT);
+        let lo_even = self.b.ins().icmp_imm_u(IntCC::Equal, odd, 0);
+        let even = self.b.ins().select(lo_even, lo, hi);
+        let side = self.b.ins().select(away, hi, lo);
+        let mid_r = self.b.ins().select(exact, even, side);
+        let use_mid = self.b.ins().band(near, mid);
+        let r = self.b.ins().select(use_mid, mid_r, between);
+        let r = self.b.ins().select(on, on_r, r);
+        let r = self.b.ins().bitcast(F64, mf(), r);
+        // finite, normal (a subnormal double keeps fewer than the 24 bits the FPU's wider
+        // exponent keeps), or an exact zero
+        let exp = self.b.ins().band_imm_u(bits, 0x7ff0_0000_0000_0000);
+        let normal = self.b.ins().icmp_imm_u(IntCC::NotEqual, exp, 0);
+        let finite = self.b.ins().icmp_imm_u(IntCC::NotEqual, exp, 0x7ff0_0000_0000_0000);
+        let normal = self.b.ins().band(normal, finite);
+        let mag = self.b.ins().band_imm_u(bits, i64::MAX);
+        let zero = self.b.ins().icmp_imm_u(IntCC::Equal, mag, 0);
+        let zero = self.b.ins().band(zero, exact);
+        let normal = if matches!(op, FpuOp::Round) {
+            // a float's own range: below it a store keeps fewer bits, above it infinity
+            let lo = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, mag, 0x3810_0000_0000_0000);
+            let hi = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, mag, 0x47f0_0000_0000_0000);
+            let f32_range = self.b.ins().band(lo, hi);
+            self.b.ins().band(normal, f32_range)
+        } else {
+            normal
+        };
+        let fine = self.b.ins().bor(normal, zero);
+        let mode = self.b.ins().bor(near, trunc);
+        let ok = self.b.ins().band(mode, fine);
+        // e NaN (an infinite operand): not exact, so leave it
+        let e_nan = self.b.ins().fcmp(FloatCC::Unordered, e, e);
+        let ok_e = self.b.ins().bnot(e_nan);
+        let ok = self.b.ins().band(ok, ok_e);
+        (ok, r)
     }
 
     // ---- comparisons -----------------------------------------------------------------------

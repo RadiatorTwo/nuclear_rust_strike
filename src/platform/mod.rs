@@ -17,6 +17,7 @@ pub mod glide;
 pub mod kernel32;
 pub mod miles;
 pub mod misc;
+pub mod sample;
 pub mod user32;
 pub mod window;
 
@@ -233,6 +234,8 @@ struct Thunk {
     f: Option<ImpFn>,
     /// not implemented: returns 0, and its first call is logged
     stub: bool,
+    /// never waits (Glide's drawing and state): the caller keeps the turn (`on_event`)
+    quick: bool,
 }
 
 static THUNKS: Mutex<Vec<Thunk>> = Mutex::new(Vec::new());
@@ -240,9 +243,14 @@ static THUNKS: Mutex<Vec<Thunk>> = Mutex::new(Vec::new());
 fn thunk_add(name: String, nargs: i32, f: Option<ImpFn>) -> u32 {
     let mut t = lock(&THUNKS);
     assert!((t.len() as u32) < THUNK_N, "out of thunks");
-    t.push(Thunk { name, nargs, stub: false, f });
+    let quick = name.strip_prefix("glide2x!").is_some_and(|n| !SLOW_GLIDE.contains(&n));
+    t.push(Thunk { name, nargs, stub: false, quick, f });
     THUNK_LO + 4 * (t.len() as u32 - 1)
 }
+
+/// Glide functions that may wait (the swap's pace, the window) or make the window: the turn is
+/// given up during them.
+const SLOW_GLIDE: &[&str] = &["grBufferSwap", "grSstWinOpen", "grSstWinClose", "grGlideInit", "grGlideShutdown", "grSstQueryHardware", "grSstQueryBoards"];
 
 fn ret0(_: &mut Cpu) -> u32 {
     0
@@ -316,6 +324,7 @@ fn turn_take() {
     }
     rt::POLL.store((t.0 != t.1 + 1) as u32, Ordering::Relaxed);
     HELD.set(true);
+    TAKEN.set(tsc());
 }
 
 fn turn_give() {
@@ -333,9 +342,43 @@ pub fn others_running() -> bool {
     t.0 != t.1
 }
 
-/// At a loop head with another thread waiting: let it run first.
+/// How long a thread keeps the turn at loop heads while another waits. Handing it over at
+/// every loop head made the game thread and the controller thread (DirectInput polled every
+/// 5 ms) trade it 60 000 times a second, each time waking a thread: 15% of the game
+/// thread's time.
+const SLICE: std::time::Duration = std::time::Duration::from_micros(500);
+
+thread_local! {
+    /// When this thread took the turn (`tsc`).
+    static TAKEN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The processor's time stamp counter: loop heads ask for the time while another thread waits,
+/// and Instant::now cost 8% of the game thread's time there.
+fn tsc() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    return unsafe { std::arch::x86_64::_rdtsc() };
+    #[cfg(not(target_arch = "x86_64"))]
+    return std::time::Instant::now().duration_since(*START.get_or_init(std::time::Instant::now)).as_nanos() as u64;
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+static START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// SLICE in `tsc` ticks (measured once).
+fn slice_ticks() -> u64 {
+    static T: OnceLock<u64> = OnceLock::new();
+    *T.get_or_init(|| {
+        let (t0, c0) = (std::time::Instant::now(), tsc());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (dt, dc) = (t0.elapsed(), tsc() - c0);
+        (dc as f64 * SLICE.as_secs_f64() / dt.as_secs_f64()) as u64
+    })
+}
+
+/// At a loop head with another thread waiting: let it run first, after this thread's slice.
 fn turn_yield() {
-    if HELD.get() {
+    if HELD.get() && tsc().wrapping_sub(TAKEN.get()) >= slice_ticks() {
         turn_give();
         turn_take();
     }
@@ -415,7 +458,7 @@ fn on_event(c: &mut Cpu, e: Event) {
     match e {
         Event::Foreign(a) if (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a) => {
             let k = ((a - THUNK_LO) / 4) as usize;
-            let (f, nargs) = {
+            let (f, nargs, quick) = {
                 let t = lock(&THUNKS);
                 let Some(th) = t.get(k) else { fatal(c, &format!("call to unused thunk {a:#x}")) };
                 if trace_api(&th.name) {
@@ -429,17 +472,25 @@ fn on_event(c: &mut Cpu, e: Event) {
                                 log!("warn: {} is not implemented (returns 0)", th.name);
                             }
                         }
-                        (f, th.nargs)
+                        (f, th.nargs, th.quick)
                     }
                     None => fatal(c, &format!("import {} is not implemented yet", th.name)),
                 }
             };
             LAST_CALL.store(mem().rd32(c.r[ESP]), std::sync::atomic::Ordering::Relaxed);
             let t0 = prof().then(std::time::Instant::now);
-            turn_give();
+            // 400 000 Glide calls a second: handing the turn over at each made the game thread
+            // wait for the others again and again. Those that never wait keep it, once the
+            // thread has its GL context (getting it waits for the window's thread).
+            let keep = quick && window::gl_ready_here();
+            if !keep {
+                turn_give();
+            }
             let r = f(c);
             let t1 = prof().then(std::time::Instant::now);
-            turn_take();
+            if !keep {
+                turn_take();
+            }
             if let (Some(t0), Some(t1)) = (t0, t1) {
                 prof_add(k, t1 - t0, t1.elapsed());
             }
@@ -695,6 +746,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     }
 
     rt::set_handler(on_event);
+    slice_ticks(); // measured now, not at a loop head
     rt::set_yield(turn_yield);
     catch_faults();
     if let Ok(w) = std::env::var("NSTRIKE_WATCH") {

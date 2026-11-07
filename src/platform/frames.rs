@@ -43,6 +43,7 @@ static NEXT: Mutex<Option<Instant>> = Mutex::new(None);
 /// (the game asks for 1; 0, no wait, when it runs below 15 fps: paced all the same).
 pub fn pace(interval: u32) {
     stats();
+    super::sample::start();
     let r = rate_mhz();
     if r == 0 {
         *NEXT.lock().unwrap() = None;

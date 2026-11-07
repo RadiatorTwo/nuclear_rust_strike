@@ -106,8 +106,35 @@ fn stack8(a: &mut CodeAssembler) -> Result<(), IcedError> {
     a.ret()
 }
 
-const SNIPPETS: [(&str, Snippet); 7] =
-    [("arith", arith), ("copy64", copy64), ("round", round), ("compare", compare), ("mixed", mixed), ("f80", f80), ("stack8", stack8)];
+/// (x: f64, y: f64, cw: u16, out): under cw, out = {x+y, x-y, x*y, x/y, sqrt|x|: f64, x: f32}
+fn precision(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    a.mov(eax, dword_ptr(esp + 24))?;
+    a.fnstcw(word_ptr(eax + 64))?;
+    a.fldcw(word_ptr(esp + 20))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fadd(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fsub(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax + 8))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fmul(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax + 16))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fdiv(qword_ptr(esp + 12))?;
+    a.fstp(qword_ptr(eax + 24))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fabs()?;
+    a.fsqrt()?;
+    a.fstp(qword_ptr(eax + 32))?;
+    a.fld(qword_ptr(esp + 4))?;
+    a.fstp(dword_ptr(eax + 40))?;
+    a.fldcw(word_ptr(eax + 64))?;
+    a.ret()
+}
+
+const SNIPPETS: [(&str, Snippet); 8] =
+    [("arith", arith), ("copy64", copy64), ("round", round), ("compare", compare), ("mixed", mixed), ("f80", f80), ("stack8", stack8), ("precision", precision)];
 
 fn same(x: f64, y: f64) -> bool {
     x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
@@ -189,4 +216,46 @@ fn x87() {
     let cpu = g.call(6, &[]);
     assert_eq!(cpu.st(0), 7.0 + std::f64::consts::PI);
     assert_eq!(cpu.top, 7);
+}
+
+/// Arithmetic under the control words the game uses (24 bits truncating, as its renderer, and
+/// the other precisions and modes): the generated code's own rounding matches `rt_fpu_round`.
+#[test]
+fn x87_precision() {
+    use nstrike::rt::{FpuOp, rt_fpu_round};
+    let g = Guest::new(&SNIPPETS);
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let m = &g.mem;
+    // right on, just above and below 24-bit numbers and their middles
+    let edges = [(1.0, 2f64.powi(-60)), (1.0, -2f64.powi(-60)), (-1.0, 2f64.powi(-60)), (1.0 + 2f64.powi(-24), 2f64.powi(-70)), (1.0 + 2f64.powi(-24), -2f64.powi(-70)), (3.0, 2f64.powi(-24)), (1.0, 3.0), (-1.0, 3.0), (5.0, -5.0)];
+    for i in 0..200000 {
+        // also floats and their sums: results right on 24-bit numbers
+        let mut v = || if rng.next() % 2 == 0 { rng.f64() as f32 as f64 } else { rng.f64() };
+        let (x, y) = if i < edges.len() * 7 { edges[i / 7] } else { (v(), v()) };
+        let cw = [0x07f, 0xc7f, 0x47f, 0x87f, 0x27f, 0xe7f, 0x37f][i % 7] as u32;
+        g.call(7, &[dbl(x)[0], dbl(x)[1], dbl(y)[0], dbl(y)[1], cw, SCRATCH]);
+        let got = |k: u32| f64::from_bits(u64::from_le_bytes(m.slice(SCRATCH + 8 * k, 8).try_into().unwrap()));
+        let ops = [(FpuOp::Add, x, y), (FpuOp::Sub, x, y), (FpuOp::Mul, x, y), (FpuOp::Div, x, y), (FpuOp::Sqrt, x.abs(), 0.0)];
+        for (k, &(op, a, b)) in ops.iter().enumerate() {
+            let want = if (cw & 0xe00) == 0x200 {
+                match op {
+                    FpuOp::Add => a + b,
+                    FpuOp::Sub => a - b,
+                    FpuOp::Mul => a * b,
+                    FpuOp::Div => a / b,
+                    _ => a.sqrt(),
+                }
+            } else {
+                rt_fpu_round(op as u32, a, b, cw)
+            };
+            assert!(same(got(k as u32), want), "op {k} ({:#x}, {:#x}) cw {cw:#x}: {:#x} want {:#x}", x.to_bits(), y.to_bits(), got(k as u32).to_bits(), want.to_bits());
+        }
+        // (below a float's normal range `rt_fpu_round` rounds twice: not checked)
+        if x != 0.0 && x.abs() < f32::MIN_POSITIVE as f64 {
+            continue;
+        }
+        let f = f32::from_bits(m.rd32(SCRATCH + 40));
+        let want = if (cw & 0xc00) == 0 { x as f32 } else { rt_fpu_round(FpuOp::Round as u32, x, 0.0, cw) as f32 };
+        assert!(same(f as f64, want as f64), "fst ({x}) cw {cw:#x}: {f} want {want}");
+    }
 }
