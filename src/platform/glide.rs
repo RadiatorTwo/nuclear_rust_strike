@@ -27,8 +27,8 @@ use super::gl::{compile, texture};
 use super::{arg, log, mem, thunk, thunk_not_implemented};
 use crate::rt::{Cpu, EAX, EBX, ECX, EDX, ESP};
 use glow::HasContext;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The module handle LoadLibraryA gives for glide2x.dll.
@@ -144,23 +144,26 @@ struct Glide {
     /// the vertices' coordinate space
     space: (u32, u32),
     view: View,
-    /// the texture shown, and its framebuffer
-    fbo: glow::Framebuffer,
+    /// the back buffer, drawn into
     color: glow::Texture,
-    /// with MSAA: the multisampled framebuffer drawn into, its renderbuffer and samples;
-    /// resolved into `color` at grBufferSwap
-    ms: Option<(glow::Framebuffer, glow::Renderbuffer, u32)>,
+    /// with MSAA: the multisampled renderbuffer drawn into and its samples; resolved into
+    /// `color` at grBufferSwap
+    ms: Option<(glow::Renderbuffer, u32)>,
     ms_max: u32,
     prog: glow::Program,
-    vao: glow::VertexArray,
     vbo: glow::Buffer,
+    /// what each thread's context has of its own (see `Local`)
+    locals: HashMap<std::thread::ThreadId, Local>,
     /// every texture, 256x256 at most, in one array: rgb premultiplied by coverage and the
     /// coverage, with mipmaps (see the module)
     array: glow::Texture,
     /// the textures' alpha: its share in covered texels, and in keyed ones
     alpha: glow::Texture,
-    /// a download changed level 0: the mipmaps are built before the next draw
-    stale: bool,
+    /// layers whose level 0 a download changed (a bit each): their mipmaps are built before
+    /// the next draw that uses mipmaps. Only theirs: building the whole array's after every
+    /// download (the movies and menu pictures are 128x128 tiles downloaded and drawn one by
+    /// one) kept the menu at 30 fps
+    stale: u64,
     /// the anisotropy set on the arrays, and the most the driver takes
     aniso: f32,
     aniso_max: f32,
@@ -184,13 +187,12 @@ struct Glide {
     gamma: f32,
     /// the texture palette (grTexDownloadTable): 0xAARRGGBB, its alpha unused
     palette: [u32; 256],
-    /// Glide's front and auxiliary buffers (the back buffer is `fbo`/`color`, drawn into):
-    /// the front one holds the picture shown; grBufferSwap swaps it with the back one
-    front: (glow::Framebuffer, glow::Texture),
-    aux: (glow::Framebuffer, glow::Texture),
+    /// Glide's front and auxiliary buffers (the back buffer is `color`): the front one holds
+    /// the picture shown; grBufferSwap swaps it with the back one
+    front: glow::Texture,
+    aux: glow::Texture,
     /// draws a texture's rectangle into a framebuffer (LFB writes)
     copy_prog: glow::Program,
-    copy_vao: glow::VertexArray,
     /// the last grLfbReadRegion, so that writing what it read back to a buffer copies on
     /// the GPU at full resolution
     last_read: Option<LfbRead>,
@@ -261,8 +263,51 @@ fn size_buffer(gl: &glow::Context, (fbo, t): (glow::Framebuffer, glow::Texture),
     }
 }
 
-thread_local! {
-    static GLIDE: RefCell<Option<Glide>> = const { RefCell::new(None) };
+/// The game draws from more than one thread (its game thread, and another for the text
+/// before a mission), each with its own GL context sharing the window's: Glide's state is one
+/// for all of them.
+static GLIDE: Mutex<Option<Glide>> = Mutex::new(None);
+
+/// GL objects contexts do not share (framebuffers, vertex arrays), made for each thread that
+/// draws.
+struct Local {
+    vao: glow::VertexArray,
+    copy_vao: glow::VertexArray,
+    /// framebuffers to read and draw levels of a layer through (building mipmaps)
+    mip: [glow::Framebuffer; 2],
+    /// a framebuffer for each texture (true) or renderbuffer drawn into
+    fbos: HashMap<(bool, u32), glow::Framebuffer>,
+}
+
+impl Local {
+    fn new(gl: &glow::Context, vbo: glow::Buffer) -> Local {
+        unsafe {
+            let vao = gl.create_vertex_array().expect("GL vertex array");
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            for (loc, n, off) in [(0, 2, 0), (1, 4, 8), (2, 2, 24), (3, 4, 32)] {
+                gl.enable_vertex_attrib_array(loc);
+                gl.vertex_attrib_pointer_f32(loc, n, glow::FLOAT, false, 4 * VERTEX as i32, off);
+            }
+            gl.enable_vertex_attrib_array(4);
+            gl.vertex_attrib_pointer_i32(4, 4, glow::UNSIGNED_INT, 4 * VERTEX as i32, 48);
+            gl.enable_vertex_attrib_array(5);
+            gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, 4 * VERTEX as i32, 64);
+            let fbo = || gl.create_framebuffer().expect("GL framebuffer");
+            Local { vao, copy_vao: gl.create_vertex_array().expect("GL vertex array"), mip: [fbo(), fbo()], fbos: HashMap::new() }
+        }
+    }
+
+    /// Delete it (on its own thread).
+    fn delete(self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_vertex_array(self.vao);
+            gl.delete_vertex_array(self.copy_vao);
+            for f in self.mip.into_iter().chain(self.fbos.into_values()) {
+                gl.delete_framebuffer(f);
+            }
+        }
+    }
 }
 
 const VS: &str = r#"
@@ -317,6 +362,10 @@ ivec4 bytes4(uint w) { return ivec4(w & 255u, (w >> 8) & 255u, (w >> 16) & 255u,
 
 vec4 texel(ivec2 p) {
     ivec2 s = tex_size;
+    // inside the primitive's texture rectangle: at a higher resolution than the game's, the
+    // edge pixels would sample the neighbouring picture of an atlas (marks over letters)
+    ivec2 lo = ivec2(floor(st_box.xy));
+    p = clamp(p, lo, max(ivec2(ceil(st_box.zw)) - 1, lo));
     p = ivec2(clamp_st.x != 0 ? clamp(p.x, 0, s.x - 1) : ((p.x % s.x) + s.x) % s.x,
               clamp_st.y != 0 ? clamp(p.y, 0, s.y - 1) : ((p.y % s.y) + s.y) % s.y);
     vec4 a = texelFetch(tex_a, ivec3(p, layer), 0);
@@ -480,10 +529,16 @@ impl Uniforms {
 }
 
 fn with<R>(f: impl FnOnce(&mut Glide, &glow::Context) -> R) -> Option<R> {
-    GLIDE.with(|g| {
-        let mut g = g.borrow_mut();
-        let g = g.as_mut()?;
-        super::window::with_gl(|gl| f(g, gl))
+    let mut g = GLIDE.lock().unwrap_or_else(|e| e.into_inner());
+    let g = g.as_mut()?;
+    super::window::with_gl(|gl| {
+        let r = f(g, gl);
+        // with more than one thread drawing, the next may be another context: it sees this
+        // one's work once it is flushed
+        if g.locals.len() > 1 {
+            unsafe { gl.flush() };
+        }
+        r
     })
 }
 
@@ -574,26 +629,8 @@ impl Glide {
     fn open(gl: &glow::Context, w: u32, h: u32) -> Glide {
         let target = (w, w * 3 / 4);
         unsafe {
-            let color = texture(gl, true);
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, target.0 as i32, target.1 as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
-            let fbo = gl.create_framebuffer().expect("GL framebuffer");
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(color), 0);
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
             let prog = compile(gl, VS, FS);
-            let vao = gl.create_vertex_array().expect("GL vertex array");
             let vbo = gl.create_buffer().expect("GL buffer");
-            gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            for (loc, n, off) in [(0, 2, 0), (1, 4, 8), (2, 2, 24), (3, 4, 32)] {
-                gl.enable_vertex_attrib_array(loc);
-                gl.vertex_attrib_pointer_f32(loc, n, glow::FLOAT, false, 4 * VERTEX as i32, off);
-            }
-            gl.enable_vertex_attrib_array(4);
-            gl.vertex_attrib_pointer_i32(4, 4, glow::UNSIGNED_INT, 4 * VERTEX as i32, 48);
-            gl.enable_vertex_attrib_array(5);
-            gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, 4 * VERTEX as i32, 64);
             let aniso_max = if gl.supported_extensions().iter().any(|e| e.ends_with("texture_filter_anisotropic")) {
                 gl.get_parameter_f32(glow::MAX_TEXTURE_MAX_ANISOTROPY_EXT)
             } else {
@@ -612,21 +649,20 @@ impl Glide {
             };
             let array = layers(glow::RGBA8);
             let alpha = layers(glow::RG8);
-            Glide {
+            let mut g = Glide {
                 res: (w, h),
                 target,
                 space: (w, h),
                 view: View::Full,
-                fbo,
-                color,
+                color: texture(gl, true),
                 ms: None,
                 ms_max: gl.get_parameter_i32(glow::MAX_SAMPLES).max(0) as u32,
                 prog,
-                vao,
                 vbo,
+                locals: HashMap::new(),
                 array,
                 alpha,
-                stale: false,
+                stale: 0,
                 aniso: 0.0,
                 aniso_max,
                 textures: BTreeMap::new(),
@@ -649,12 +685,57 @@ impl Glide {
                 batch_mode: glow::TRIANGLES,
                 gamma: 1.0,
                 palette: [0; 256],
-                front: new_buffer(gl, target.0, target.1),
-                aux: new_buffer(gl, target.0, target.1),
+                front: texture(gl, true),
+                aux: texture(gl, true),
                 copy_prog: compile(gl, COPY_VS, COPY_FS),
-                copy_vao: gl.create_vertex_array().expect("GL vertex array"),
                 last_read: None,
                 saved: Vec::new(),
+            };
+            g.size_buffers(gl);
+            g
+        }
+    }
+
+    /// This thread's own GL objects.
+    fn local(&mut self, gl: &glow::Context) -> &mut Local {
+        let vbo = self.vbo;
+        self.locals.entry(std::thread::current().id()).or_insert_with(|| Local::new(gl, vbo))
+    }
+
+    /// This thread's framebuffer drawing into a texture.
+    fn tex_fbo(&mut self, gl: &glow::Context, t: glow::Texture) -> glow::Framebuffer {
+        *self.local(gl).fbos.entry((true, t.0.get())).or_insert_with(|| unsafe {
+            let f = gl.create_framebuffer().expect("GL framebuffer");
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(t), 0);
+            f
+        })
+    }
+
+    /// This thread's framebuffer drawing into a renderbuffer.
+    fn rb_fbo(&mut self, gl: &glow::Context, rb: glow::Renderbuffer) -> glow::Framebuffer {
+        *self.local(gl).fbos.entry((false, rb.0.get())).or_insert_with(|| unsafe {
+            let f = gl.create_framebuffer().expect("GL framebuffer");
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(rb));
+            f
+        })
+    }
+
+    /// The three buffers at the target's size, black.
+    fn size_buffers(&mut self, gl: &glow::Context) {
+        let (w, h) = self.target;
+        for t in [self.color, self.front, self.aux] {
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w as i32, h as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            }
+            let f = self.tex_fbo(gl, t);
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
             }
         }
     }
@@ -698,9 +779,7 @@ impl Glide {
             return;
         }
         self.target = (w, h);
-        for b in [(self.fbo, self.color), self.front, self.aux] {
-            size_buffer(gl, b, w, h);
-        }
+        self.size_buffers(gl);
         self.multisample(gl, true);
     }
 
@@ -709,43 +788,56 @@ impl Glide {
     fn multisample(&mut self, gl: &glow::Context, resized: bool) {
         let samples = MSAA.load(Ordering::Relaxed).min(self.ms_max);
         let samples = if samples < 2 { 0 } else { samples };
-        if !resized && self.ms.map_or(0, |m| m.2) == samples {
+        if !resized && self.ms.map_or(0, |m| m.1) == samples {
             return;
         }
-        unsafe {
-            if let Some((fbo, rb, _)) = self.ms.take() {
-                gl.delete_framebuffer(fbo);
-                gl.delete_renderbuffer(rb);
+        if let Some((rb, _)) = self.ms.take() {
+            // the framebuffers on it (other threads' are left: they cannot be deleted here)
+            let key = (false, rb.0.get());
+            if let Some(f) = self.local(gl).fbos.remove(&key) {
+                unsafe { gl.delete_framebuffer(f) };
             }
-            if samples == 0 {
-                return;
+            for l in self.locals.values_mut() {
+                l.fbos.remove(&key);
             }
+            unsafe { gl.delete_renderbuffer(rb) };
+        }
+        if samples == 0 {
+            return;
+        }
+        let rb = unsafe {
             let rb = gl.create_renderbuffer().expect("GL renderbuffer");
             gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
             gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples as i32, glow::RGBA8, self.target.0 as i32, self.target.1 as i32);
-            let fbo = gl.create_framebuffer().expect("GL framebuffer");
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(rb));
+            rb
+        };
+        self.ms = Some((rb, samples));
+        let f = self.rb_fbo(gl, rb);
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
             gl.disable(glow::SCISSOR_TEST);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
-            self.ms = Some((fbo, rb, samples));
         }
     }
 
     /// The framebuffer drawn into.
-    fn draw_fbo(&self) -> glow::Framebuffer {
-        self.ms.map_or(self.fbo, |m| m.0)
+    fn draw_fbo(&mut self, gl: &glow::Context) -> glow::Framebuffer {
+        match self.ms {
+            Some((rb, _)) => self.rb_fbo(gl, rb),
+            None => self.tex_fbo(gl, self.color),
+        }
     }
 
-    /// The multisampled picture into the texture shown.
-    fn resolve(&self, gl: &glow::Context) {
-        if let Some((fbo, _, _)) = self.ms {
+    /// The multisampled picture into the back buffer's texture.
+    fn resolve(&mut self, gl: &glow::Context) {
+        if let Some((rb, _)) = self.ms {
             let (w, h) = (self.target.0 as i32, self.target.1 as i32);
+            let (from, to) = (self.rb_fbo(gl, rb), self.tex_fbo(gl, self.color));
             unsafe {
                 gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to));
                 gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
@@ -755,23 +847,24 @@ impl Glide {
     /// A Glide buffer (GR_BUFFER_FRONTBUFFER 0, BACKBUFFER 1, AUXBUFFER 2) to read: the back
     /// one resolved.
     fn read_buffer(&mut self, gl: &glow::Context, b: u32) -> (glow::Framebuffer, glow::Texture) {
-        match b {
+        let t = match b {
             0 => self.front,
             2 => self.aux,
             _ => {
                 self.flush(gl);
                 self.resolve(gl);
-                (self.fbo, self.color)
+                self.color
             }
-        }
+        };
+        (self.tex_fbo(gl, t), t)
     }
 
     /// The framebuffer to write a Glide buffer through.
-    fn write_buffer(&self, b: u32) -> glow::Framebuffer {
+    fn write_buffer(&mut self, gl: &glow::Context, b: u32) -> glow::Framebuffer {
         match b {
-            0 => self.front.0,
-            2 => self.aux.0,
-            _ => self.draw_fbo(),
+            0 => self.tex_fbo(gl, self.front),
+            2 => self.tex_fbo(gl, self.aux),
+            _ => self.draw_fbo(gl),
         }
     }
 
@@ -790,13 +883,14 @@ impl Glide {
     /// (GL pixels) of a framebuffer.
     fn copy(&mut self, gl: &glow::Context, tex: glow::Texture, src: [f32; 4], fbo: glow::Framebuffer, rect: [i32; 4]) {
         self.flush(gl);
+        let vao = self.local(gl).copy_vao;
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.viewport(rect[0], rect[1], rect[2], rect[3]);
             gl.use_program(Some(self.copy_prog));
-            gl.bind_vertex_array(Some(self.copy_vao));
+            gl.bind_vertex_array(Some(vao));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.uniform_1_i32(gl.get_uniform_location(self.copy_prog, "img").as_ref(), 0);
@@ -846,7 +940,7 @@ impl Glide {
     fn lfb_write(&mut self, gl: &glow::Context, buffer: u32, at: (u32, u32), format: u32, size: (u32, u32), stride: u32, data: u32) {
         let m = mem();
         let rect = self.target_rect([at.0, at.1, size.0, size.1]);
-        let fbo = self.write_buffer(buffer);
+        let fbo = self.write_buffer(gl, buffer);
         let (rw, rh) = size;
         let row_bytes = (rw * 2) as usize;
         let unchanged = self.last_read.as_ref().is_some_and(|r| {
@@ -939,7 +1033,7 @@ impl Glide {
         }
         let tex = sv.tex;
         let rect = self.target_rect([at.0, at.1, size.0, size.1]);
-        let fbo = self.draw_fbo();
+        let fbo = self.draw_fbo(gl);
         self.copy(gl, tex, [0.0, 0.0, 1.0, 1.0], fbo, rect);
         true
     }
@@ -950,14 +1044,19 @@ impl Glide {
             return;
         }
         let s = self.state;
+        let filter = FILTER.load(Ordering::Relaxed);
+        if filter != 0 && s.key & 0xff_ffff == 0 && self.stale != 0 {
+            self.build_mipmaps(gl);
+        }
+        let fbo = self.draw_fbo(gl);
+        let vao = self.local(gl).vao;
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.draw_fbo()));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             self.scissor(gl, s.clip);
             gl.use_program(Some(self.prog));
-            gl.bind_vertex_array(Some(self.vao));
+            gl.bind_vertex_array(Some(vao));
             let u = &self.uniforms;
             gl.uniform_2_f32(u.space.as_ref(), self.space.0 as f32, self.space.1 as f32);
-            let filter = FILTER.load(Ordering::Relaxed);
             let mipmaps = filter != 0 && s.key & 0xff_ffff == 0;
             gl.uniform_1_i32(u.mipmaps.as_ref(), mipmaps as i32);
             gl.uniform_1_i32(u.tex_a.as_ref(), 1);
@@ -966,15 +1065,9 @@ impl Glide {
             for (k, t) in [(glow::TEXTURE1, self.alpha), (glow::TEXTURE0, self.array)] {
                 gl.active_texture(k);
                 gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(t));
-                if mipmaps && self.stale {
-                    gl.generate_mipmap(glow::TEXTURE_2D_ARRAY);
-                }
                 if aniso != self.aniso && self.aniso_max > 1.0 {
                     gl.tex_parameter_f32(glow::TEXTURE_2D_ARRAY, glow::TEXTURE_MAX_ANISOTROPY_EXT, aniso);
                 }
-            }
-            if mipmaps {
-                self.stale = false;
             }
             self.aniso = aniso;
             gl.uniform_2_i32(u.clamp_st.as_ref(), s.clamp.0 as i32, s.clamp.1 as i32);
@@ -1211,8 +1304,30 @@ impl Glide {
                     glow::PixelUnpackData::Slice(Some(px)),
                 );
             }
-            self.stale = true;
+            self.stale |= 1 << layer;
         }
+    }
+
+    /// The mipmaps of the stale layers, each level filtered from the one above.
+    fn build_mipmaps(&mut self, gl: &glow::Context) {
+        let [read, draw] = self.local(gl).mip;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(draw));
+            for layer in (0..LAYERS).filter(|l| self.stale >> l & 1 != 0) {
+                for t in [self.array, self.alpha] {
+                    for level in 1..LEVELS {
+                        let (a, b) = (256 >> (level - 1), 256 >> level);
+                        gl.framebuffer_texture_layer(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, Some(t), level - 1, layer as i32);
+                        gl.framebuffer_texture_layer(glow::DRAW_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, Some(t), level, layer as i32);
+                        gl.blit_framebuffer(0, 0, a, a, 0, 0, b, b, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                    }
+                }
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        self.stale = 0;
     }
 }
 
@@ -1274,31 +1389,30 @@ fn sst_win_open(c: &mut Cpu) -> u32 {
         super::window::with_gl(|gl| g.resize(gl, ASPECT, wh));
     }
     let ok = g.is_some();
-    GLIDE.with(|s| *s.borrow_mut() = g);
+    *GLIDE.lock().unwrap_or_else(|e| e.into_inner()) = g;
     ok as u32
 }
 
 fn sst_win_close(_: &mut Cpu) -> u32 {
     with(|g, gl| unsafe {
-        if let Some((fbo, rb, _)) = g.ms.take() {
-            gl.delete_framebuffer(fbo);
+        // this thread's own objects (other threads' cannot be deleted here)
+        if let Some(l) = g.locals.remove(&std::thread::current().id()) {
+            l.delete(gl);
+        }
+        if let Some((rb, _)) = g.ms.take() {
             gl.delete_renderbuffer(rb);
         }
-        gl.delete_framebuffer(g.fbo);
-        gl.delete_texture(g.color);
-        for (fbo, t) in [g.front, g.aux] {
-            gl.delete_framebuffer(fbo);
+        for t in [g.color, g.front, g.aux, g.array, g.alpha] {
             gl.delete_texture(t);
         }
         for sv in g.saved.drain(..) {
             gl.delete_texture(sv.tex);
         }
         gl.delete_program(g.copy_prog);
-        gl.delete_vertex_array(g.copy_vao);
-        gl.delete_texture(g.array);
-        gl.delete_texture(g.alpha);
+        gl.delete_program(g.prog);
+        gl.delete_buffer(g.vbo);
     });
-    GLIDE.with(|s| *s.borrow_mut() = None);
+    *GLIDE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     1
 }
 
@@ -1307,8 +1421,9 @@ fn buffer_clear(c: &mut Cpu) -> u32 {
     let color = arg(c, 0);
     with(|g, gl| {
         g.flush(gl);
+        let fbo = g.draw_fbo(gl);
         unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(g.draw_fbo()));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             g.scissor(gl, g.state.clip);
             let ch = |sh: u32| (color >> sh & 0xff) as f32 / 255.0;
             gl.clear_color(ch(16), ch(8), ch(0), 1.0);
@@ -1319,20 +1434,37 @@ fn buffer_clear(c: &mut Cpu) -> u32 {
     0
 }
 
-fn buffer_swap(_: &mut Cpu) -> u32 {
+/// The card's vertical retrace: 60 Hz.
+const RETRACE: std::time::Duration = std::time::Duration::from_nanos(1_000_000_000 / 60);
+
+/// grBufferSwap(swap_interval): a picture at most every `interval` retraces, as the card's swap
+/// waits for them (the game asks for 1, 0 only in one mode); without the wait the menu ran at
+/// hundreds of frames.
+fn buffer_swap(c: &mut Cpu) -> u32 {
+    use std::time::Instant;
+    static NEXT: Mutex<Option<Instant>> = Mutex::new(None);
+    let interval = arg(c, 0);
+    if interval > 0 {
+        let now = Instant::now();
+        let at = NEXT.lock().unwrap().filter(|&t| t > now);
+        if let Some(t) = at {
+            std::thread::sleep(t - now);
+        }
+        // the next one: a retrace after this, or after now if the game fell behind
+        *NEXT.lock().unwrap() = Some(at.unwrap_or(now) + RETRACE * interval);
+    }
     let shown = with(|g, gl| {
         g.flush(gl);
         g.resolve(gl);
         // the buffers trade places, as on the card: the game keeps what is under its cursor
         // for each of them
-        let back = (g.fbo, g.color);
-        (g.fbo, g.color) = g.front;
-        g.front = back;
-        if let Some((ms, _, _)) = g.ms {
+        std::mem::swap(&mut g.color, &mut g.front);
+        if let Some((rb, _)) = g.ms {
             let (w, h) = (g.target.0 as i32, g.target.1 as i32);
+            let ms = g.rb_fbo(gl, rb);
             g.copy(gl, g.color, [0.0, 0.0, 1.0, 1.0], ms, [0, 0, w, h]);
         }
-        (g.front.1, g.target, g.gamma)
+        (g.front, g.target, g.gamma)
     });
     if let Some((tex, (w, h), gamma)) = shown {
         super::window::show_texture(tex, w, h, gamma);
@@ -1559,10 +1691,10 @@ fn alpha_test_reference(c: &mut Cpu) -> u32 {
 /// The game's `gl_CopyBitmap_(eax bitmap, edx pixels, ebx stride, ecx x, [esp+4] y,
 /// [esp+8] flags)`: flags bit 0 saves the back buffer's rectangle under the bitmap's size into
 /// the pixels (grLfbReadRegion, at 640x480 in RGB565), else the pixels are drawn there as
-/// 128x128 textures. On the card the two give back the same pixels; here the target has more
-/// of them, and what the cursor puts back (the background it saved) came out blurred and a
-/// little darker. So a save also keeps the rectangle on the GPU, and drawing back pixels that
-/// are still what was saved draws that instead.
+/// 128x128 textures. What the cursor puts back (the background it saved) does not come out as
+/// it was on modern systems; here it was blurred and a little darker. So a save keeps the
+/// rectangle on the GPU instead, and drawing back pixels that are still what they were at the
+/// save draws that.
 pub const COPY_BITMAP: u32 = 0x47a360;
 
 pub fn copy_bitmap(c: &mut Cpu) {
@@ -1575,10 +1707,12 @@ pub fn copy_bitmap(c: &mut Cpu) {
         log!("glide: gl_CopyBitmap {x},{y} {w}x{h} part at {bx},{by} pixels {data:#x} stride {stride} flags {flags:#x}");
     }
     if flags & 1 != 0 {
-        crate::rt::call_original(c, COPY_BITMAP);
-        if c.r[EAX] & 0xff != 0 {
-            with(|g, gl| g.save(gl, [x, y, w, h], data, stride));
-        }
+        // kept on the GPU only: reading the pixels back (grLfbReadRegion) waits for the GPU to
+        // finish the frame, every frame (the menu ran at 30 fps). The pixels in guest memory
+        // stay as they are: only gl_CopyBitmap_ uses them, to draw them back (`restore`).
+        with(|g, gl| g.save(gl, [x, y, w, h], data, stride));
+        c.r[EAX] = (c.r[EAX] & !0xff) | 1;
+        c.r[ESP] += 12;
         return;
     }
     // drawn back as it was (flag 8: with the chroma key, the cursor itself)

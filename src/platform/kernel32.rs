@@ -843,7 +843,16 @@ fn query_performance_counter(c: &mut Cpu) -> u32 {
 
 fn sleep(c: &mut Cpu) -> u32 {
     let ms = arg(c, 0);
-    if ms == 0 { std::thread::yield_now() } else { std::thread::sleep(Duration::from_millis(ms as u64)) }
+    // Sleep(0) gives the rest of the time slice to the threads that are ready. Guest threads run
+    // one at a time here, and a thread back from an import waits for the running one to hand
+    // over at a loop head: the game's message loop (PeekMessageA, Sleep(0)) took the turn
+    // back some 800 000 times a second, the game thread got little done (slow menu, long
+    // loading). With another thread running it really sleeps a millisecond.
+    if ms == 0 && !super::others_running() {
+        std::thread::yield_now()
+    } else {
+        std::thread::sleep(Duration::from_millis(ms.max(1) as u64))
+    }
     0
 }
 

@@ -149,8 +149,14 @@ pub fn pump(wait: Duration) {
                 *SHARE_WANTED.lock().unwrap() = true;
             }
         }
-        if let Some((tex, w, hh, gamma)) = SHOW.lock().unwrap().take() {
+        if let Some((tex, w, hh, gamma, fence)) = SHOW.lock().unwrap().take() {
             if let Some(gl) = &mut h.app.gl {
+                if let Some(Fence(f)) = fence {
+                    unsafe {
+                        glow::HasContext::wait_sync(&gl.gl, f, 0, glow::TIMEOUT_IGNORED);
+                        glow::HasContext::delete_sync(&gl.gl, f);
+                    }
+                }
                 gl.shown = (tex, w, hh, false, gamma);
                 h.app.draw();
             }
@@ -373,7 +379,13 @@ static SHARE_WANTED: Mutex<bool> = Mutex::new(false);
 static SHARE_GIVEN: Mutex<Option<super::gl::SharedParts>> = Mutex::new(None);
 static SHARE_CV: std::sync::Condvar = std::sync::Condvar::new();
 /// A texture another thread rendered, to show at the window thread's next pump.
-static SHOW: Mutex<Option<(glow::Texture, u32, u32, f32)>> = Mutex::new(None);
+static SHOW: Mutex<Option<(glow::Texture, u32, u32, f32, Option<Fence>)>> = Mutex::new(None);
+
+/// A GL fence: the rendering of a picture another thread hands over. The window's context
+/// waits for it on the GPU, so the thread that rendered does not wait at all.
+struct Fence(glow::Fence);
+// SAFETY: a sync object belongs to the share group, not to a thread
+unsafe impl Send for Fence {}
 
 /// Run `f` with an OpenGL context: the window's on its thread, else a context sharing its
 /// objects (made at the first use, by the window's thread at its next pump). None before the
@@ -396,15 +408,22 @@ pub fn with_gl<R>(f: impl FnOnce(&glow::Context) -> R) -> Option<R> {
 }
 
 /// Show a texture something rendered (first row at the bottom), w x h, with a gamma. From
-/// another thread: shown at the window thread's next pump (its rendering finished first).
+/// another thread: shown at the window thread's next pump, after its rendering (a fence).
 pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
     if !on_main() {
-        SHARED.with_borrow(|sh| {
-            if let Some(s) = sh {
-                unsafe { glow::HasContext::finish(&s.gl) };
+        let fence = SHARED.with_borrow(|sh| {
+            let s = sh.as_ref()?;
+            unsafe {
+                let f = glow::HasContext::fence_sync(&s.gl, glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
+                glow::HasContext::flush(&s.gl);
+                f
             }
         });
-        *SHOW.lock().unwrap() = Some((tex, w, h, gamma));
+        let old = SHOW.lock().unwrap().replace((tex, w, h, gamma, fence.map(Fence)));
+        // not shown: its fence is not needed any more
+        if let Some((.., Some(Fence(f)))) = old {
+            SHARED.with_borrow(|sh| sh.as_ref().map(|s| unsafe { glow::HasContext::delete_sync(&s.gl, f) }));
+        }
         return;
     }
     with_host(|host| {

@@ -326,6 +326,12 @@ fn turn_give() {
     TURN.cv.notify_all();
 }
 
+/// Whether another guest thread runs or waits for the turn (asked by a thread without it).
+pub fn others_running() -> bool {
+    let t = lock(&TURN.tickets);
+    t.0 != t.1
+}
+
 /// At a loop head with another thread waiting: let it run first.
 fn turn_yield() {
     if HELD.get() {

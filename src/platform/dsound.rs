@@ -70,6 +70,10 @@ struct Voice {
     linear: Option<[f32; 2]>,
     /// further times to play from the start after the end (Miles' loop count)
     loops: u32,
+    /// buffers (data, bytes) played after this one without a gap (Miles' double buffering)
+    next: VecDeque<(u32, u32)>,
+    /// buffers played to their end since the last `sample_take_done`
+    done: u32,
 }
 
 impl Voice {
@@ -107,7 +111,7 @@ impl Voice {
 
     /// Mix into interleaved stereo frames at `out_rate`, advancing the position.
     fn mix(&mut self, out: &mut [[f32; 2]], out_rate: u32) {
-        let frames = self.frames();
+        let mut frames = self.frames();
         if !self.playing || self.primary || frames == 0 {
             return;
         }
@@ -137,9 +141,19 @@ impl Voice {
                 } else if self.loops > 0 {
                     self.loops -= 1;
                     self.pos -= frames as f64;
+                } else if let Some((data, bytes)) = self.next.pop_front() {
+                    self.pos -= frames as f64;
+                    (self.data, self.bytes) = (data, bytes);
+                    self.done += 1;
+                    frames = self.frames();
+                    if frames == 0 {
+                        self.playing = false;
+                        break;
+                    }
                 } else {
                     self.playing = false;
                     self.pos = 0.0;
+                    self.done += 1;
                     break;
                 }
             }
@@ -377,7 +391,7 @@ fn ds_create_sound_buffer(c: &mut Cpu) -> u32 {
     }
     mx.voices.insert(
         obj,
-        Voice { data, bytes, fmt, freq: 0, pos: 0.0, playing: false, looping: false, volume: 0, pan: 0, primary, refs: 1, signed8: false, linear: None, loops: 0 },
+        Voice { data, bytes, fmt, freq: 0, pos: 0.0, playing: false, looping: false, volume: 0, pan: 0, primary, refs: 1, signed8: false, linear: None, loops: 0, next: VecDeque::new(), done: 0 },
     );
     m.wr32(out, obj);
     OK
@@ -668,7 +682,7 @@ fn parse_wave(p: u32, n: u32) -> Option<Voice> {
         at += 8 + ((len + 1) & !1);
     }
     let (fmt, (data, bytes)) = (fmt?, data?);
-    Some(Voice { data, bytes, fmt, freq: 0, pos: 0.0, playing: true, looping: false, volume: 0, pan: 0, primary: false, refs: 1, signed8: false, linear: None, loops: 0 })
+    Some(Voice { data, bytes, fmt, freq: 0, pos: 0.0, playing: true, looping: false, volume: 0, pan: 0, primary: false, refs: 1, signed8: false, linear: None, loops: 0, next: VecDeque::new(), done: 0 })
 }
 
 /// PlaySoundA(sound, module, flags): a WAVE resource, a file or a sound in memory.
@@ -756,8 +770,22 @@ pub fn sample_start(key: u32, s: &Sample) {
             signed8: s.signed8,
             linear: Some(s.gain),
             loops: if looping { 0 } else { s.loops },
+            next: VecDeque::new(),
+            done: 0,
         },
     );
+}
+
+/// Queue a buffer to play after the voice's current one (and those queued before).
+pub fn sample_queue(key: u32, data: u32, bytes: u32) {
+    if let Some(v) = mixer().voices.get_mut(&key) {
+        v.next.push_back((data, bytes));
+    }
+}
+
+/// Buffers the voice played to their end since the last call.
+pub fn sample_take_done(key: u32) -> u32 {
+    mixer().voices.get_mut(&key).map_or(0, |v| std::mem::take(&mut v.done))
 }
 
 /// Change a playing voice's gain and rate.

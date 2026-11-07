@@ -54,7 +54,16 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 - [x] The cursor's known flaw on modern systems (what it puts back is not the background):
       `gl_CopyBitmap_` hooked, the background it saves is kept on the GPU at full resolution
       and drawn back from there. The movies' purple look is their own
-- [ ] Miles streaming (AIL_sample_buffer_ready/load_sample_buffer, through pointers)
+- [x] Miles streaming (AIL_sample_buffer_ready/load_sample_buffer): speech. Without it the
+      game waited for ever after leaving a mission
+- [x] Speed: the menu ran at 30 fps (the whole texture array's mipmaps built after every
+      128x128 tile; the cursor's background read back from the GPU every frame); swaps paced
+      to 60 Hz as the card's retrace; Sleep(0) with another guest thread running sleeps 1 ms
+      (the message loop took the turn back ~800 000 times a second)
+- [x] Glide from more than one thread: the text before and after a mission is drawn by
+      another thread (it was invisible: 8 s of "loading"); a wrong palette from it may have
+      been the garbled Config text. Textures are clamped to the primitive's rectangle (marks
+      over letters at high resolution)
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
 
 ### 4. Later

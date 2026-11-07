@@ -77,11 +77,13 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   gl_CopyBitmap_ (`glide.rs`).
 - `kernel32.rs`: VirtualAlloc is 64 KB aligned (Windows' granularity): the game's memory
   manager SSMem (0x440dd0...) breaks its free list otherwise (SSMemAllocAlign's padding).
-  DeviceIoControl (MEMVXD) fails; SuspendThread is ignored.
+  DeviceIoControl (MEMVXD) fails; SuspendThread is ignored. Sleep(0) sleeps 1 ms when another
+  guest thread runs: guest threads take turns (`turn_take`), and WinMain's PeekMessage/Sleep(0)
+  loop otherwise took the turn back at every loop head of the game thread.
 - `dinput.rs` (new): system keyboard (DIK codes from `user32::poll`) and mouse (raw motion
   from winit's DeviceEvent), GetDeviceState and buffered GetDeviceData. `NSTRIKE_DI_LOG=1`.
 - `miles.rs` (new): AIL_* on the dsound mixer (`dsound::Sample`: linear gain, signed 8-bit,
-  loop counts); the driver's +0x4c is an IDirectSound (the movie player uses it); timers
+  loop counts; double buffering through `dsound::sample_queue`: speech, waited for); the driver's +0x4c is an IDirectSound (the movie player uses it); timers
   are threads calling `callback(user)`; MIDI messages are dropped (`NSTRIKE_MIDI_LOG=1`).
   Without Miles the game stops: "Unable to initialize audio system". `NSTRIKE_AIL_LOG=1`.
 - `dsound.rs`: the primary buffer reports 64 KB (the movie player sizes its buffer by it).
@@ -95,7 +97,10 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   4:3 at the window's height. The game draws Glide on its game thread, not the window's:
   `window::with_gl` gives such a thread a context sharing the window's (`gl::Gl::share`,
   made by the window thread at its next pump; the window's surface is shared by pointer);
-  `show_texture` from there finishes and hands the texture over (`SHOW`). The game's Glide
+  `show_texture` from there hands the texture over with a fence (`SHOW`). The game draws from
+  two threads (the game's, and `trantext` for the text before and after a mission): Glide's
+  state is global (`GLIDE` mutex); what contexts do not share (framebuffers, VAOs) is made
+  per thread (`Local`), and with two threads every call ends with glFlush. The game's Glide
   layer is `gl_*` (0x478cc8...): `gl_ScaledTransferToLFB_` draws 16-bit pictures (movies,
   menu backgrounds) as 128x128 tiles, `gl_CopyBitmap_` saves what is under the cursor with
   grLfbReadRegion (hooked: the save is kept on the GPU and drawn back from there, flags 7 save,

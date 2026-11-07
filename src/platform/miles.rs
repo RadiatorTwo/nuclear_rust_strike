@@ -11,7 +11,7 @@
 
 use super::{Import, alloc, arg, free, guest_call, log, mem};
 use crate::rt::Cpu;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -51,11 +51,15 @@ struct Sample {
     /// 0: for ever, else times played
     loop_count: u32,
     status: u32,
+    /// double buffering: the buffers loaded and not played yet, in order, and the one to fill
+    /// next
+    queued: VecDeque<u32>,
+    fill: u32,
 }
 
 impl Sample {
     fn new() -> Sample {
-        Sample { format: 0, flags: 0, data: 0, bytes: 0, rate: 11025, volume: 127, pan: 64, loop_count: 1, status: SMP_DONE }
+        Sample { format: 0, flags: 0, data: 0, bytes: 0, rate: 11025, volume: 127, pan: 64, loop_count: 1, status: SMP_DONE, queued: VecDeque::new(), fill: 0 }
     }
 
     /// Left and right gain: volume in proportion, pan as Miles' linear balance.
@@ -289,12 +293,55 @@ fn sample_status(c: &mut Cpu) -> u32 {
     st
 }
 
-/// Double-buffered streaming (AIL_load_sample_buffer / AIL_sample_buffer_ready, called
-/// through pointers): not yet; no buffer is ever ready.
-fn not_used(c: &mut Cpu) -> u32 {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| log!("warn: Miles streaming (AIL_sample_buffer_ready) not implemented yet ({:#x})", arg(c, 0)));
-    u32::MAX
+/// Double buffering (the game streams speech this way): the game fills buffer 0 or 1 when
+/// AIL_sample_buffer_ready names one, AIL_load_sample_buffer hands it over and the voice plays
+/// the buffers one after the other (`dsound::sample_queue`).
+/// Drop the buffers the voice has played from the queue.
+fn played(h: u32, s: &mut Sample) {
+    let done = super::dsound::sample_take_done(h);
+    for _ in 0..done {
+        s.queued.pop_front();
+    }
+    if !super::dsound::sample_playing(h) {
+        s.queued.clear();
+    }
+}
+
+/// AIL_sample_buffer_ready(S): the buffer to fill next, or -1 while both are queued.
+fn sample_buffer_ready(c: &mut Cpu) -> u32 {
+    let h = arg(c, 0);
+    with_sample(h, |s| {
+        played(h, s);
+        if s.queued.len() < 2 { s.fill } else { u32::MAX }
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// AIL_load_sample_buffer(S, buffer, data, bytes): queued to play (0 bytes: no more).
+fn load_sample_buffer(c: &mut Cpu) -> u32 {
+    let (h, n, data, bytes) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3));
+    ail_log!("AIL_load_sample_buffer({h:#x}, {n}, {data:#x}, {bytes})");
+    if bytes == 0 {
+        return 0;
+    }
+    let start = with_sample(h, |s| {
+        played(h, s);
+        s.fill = (n & 1) ^ 1;
+        s.queued.push_back(n);
+        s.status = SMP_PLAYING;
+        if super::dsound::sample_playing(h) {
+            super::dsound::sample_queue(h, data, bytes);
+            None
+        } else {
+            let mut one = s.clone();
+            (one.data, one.bytes, one.loop_count) = (data, bytes, 1);
+            Some(one)
+        }
+    });
+    if let Some(Some(s)) = start {
+        s.start(h);
+    }
+    0
 }
 
 // ---- timers -------------------------------------------------------------------------------------
@@ -427,8 +474,8 @@ pub const IMPORTS: &[Import] = &[
     ("_AIL_init_sample@4", 1, init_sample),
     ("_AIL_set_sample_type@12", 3, set_sample_type),
     ("_AIL_set_sample_address@12", 3, set_sample_address),
-    ("_AIL_load_sample_buffer@16", 4, not_used),
-    ("_AIL_sample_buffer_ready@4", 1, not_used),
+    ("_AIL_load_sample_buffer@16", 4, load_sample_buffer),
+    ("_AIL_sample_buffer_ready@4", 1, sample_buffer_ready),
     ("_AIL_minimum_sample_buffer_size@12", 3, minimum_sample_buffer_size),
     ("_AIL_set_sample_playback_rate@8", 2, set_sample_playback_rate),
     ("_AIL_set_sample_volume@8", 2, set_sample_volume),
