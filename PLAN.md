@@ -85,9 +85,10 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 - [ ] recomp_kit: the generic part of fixed logic rate + pictures between frames, GUIDE section
 - [x] Settings file `game_files/nstrike.toml` (`settings.rs`): window, fullscreen (Alt+Enter
       saves it), frame rate, MSAA, texture filter; `NSTRIKE_*` override for one run
-- [ ] Overlay menu (our own, drawn in GL over the game, opened by a key) for the port's
-      settings. Decided: the game's Config menu is not extended, except for what it has
-      already (the resolution): such settings in both places
+- [x] Overlay menu (`menu.rs`, F10): fullscreen, window size, frame rate, MSAA, texture
+      filter; used at once and saved; a mission stands still while it is open. Decided: the
+      game's Config menu is not extended, except for what it has already (the resolution)
+- [ ] Overlay menu: gamepad, more settings as they come (widescreen, resolution scale)
 
 ### 4. Later
 - [ ] Videos (`videos.res`: format unknown yet)

@@ -15,6 +15,8 @@ pub mod gdi32;
 pub mod gl;
 pub mod glide;
 pub mod kernel32;
+pub mod menu;
+mod font;
 pub mod miles;
 pub mod misc;
 pub mod pictures;

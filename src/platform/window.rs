@@ -52,6 +52,8 @@ struct App {
     cursor_caught: bool,
     /// the cursor as last set on the window: hidden
     cursor_hidden: bool,
+    /// our menu (F10), while open
+    menu: Option<super::menu::Menu>,
 }
 
 struct Host {
@@ -115,6 +117,7 @@ fn with_host<R>(f: impl FnOnce(&mut Host) -> R) -> R {
                     focused: true,
                     cursor_caught: false,
                     cursor_hidden: false,
+                    menu: None,
                 },
             }
         });
@@ -173,7 +176,7 @@ pub fn pump(wait: Duration) {
         }
         let _ = h.event_loop.pump_app_events(Some(wait), &mut h.app);
         h.app.catch_cursor();
-        scripted(&mut h.app.input);
+        scripted(&mut h.app);
         h.app.catch_cursor();
     });
 }
@@ -188,7 +191,7 @@ pub fn pump(wait: Duration) {
 /// characters, `_` a space), `char@0d` (one, hex). `NSTRIKE_INPUT=@file.txt` reads the items from
 /// a file; `#` starts a comment to the end of the line. A move also moves DirectInput's mouse
 /// by the way from the move before (from the frame's centre for the first).
-fn scripted(input: &mut VecDeque<Input>) {
+fn scripted(app: &mut App) {
     static SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
     static LAST: Mutex<Option<(i32, i32)>> = Mutex::new(None);
     let mut s = SCRIPT.lock().unwrap();
@@ -199,10 +202,12 @@ fn scripted(input: &mut VecDeque<Input>) {
             Input::Poke(a, v) => super::mem().wr32(a, v),
             Input::Move(x, y) => {
                 let (lx, ly) = LAST.lock().unwrap().replace((x, y)).unwrap_or((320, 240));
-                super::dinput::motion(x - lx, y - ly);
-                input.push_back(Input::Move(x, y));
+                if !super::menu::is_open() {
+                    super::dinput::motion(x - lx, y - ly);
+                }
+                app.push(Input::Move(x, y));
             }
-            i => input.push_back(i),
+            i => app.push(i),
         }
     }
 }
@@ -655,9 +660,70 @@ impl App {
         }
     }
 
-    /// Input from the window system for the game.
+    /// Input from the window system for the game, or for our menu while it is open (F10 opens
+    /// it). Keys and buttons going up, the focus and the close button still reach the game:
+    /// nothing stays held.
     fn push(&mut self, i: Input) {
-        self.input.push_back(i);
+        use super::menu::{Action, Menu, KEY};
+        let full = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
+        let Some(menu) = &mut self.menu else {
+            if matches!(i, Input::Key { vk: KEY, down: true, repeat: false, .. }) {
+                let display = self.window.as_ref().and_then(|w| w.current_monitor()).map_or((1280, 960), |m| (m.size().width, m.size().height));
+                self.menu = Some(Menu::open(display, full));
+                self.show_menu();
+                self.catch_cursor();
+            } else {
+                self.input.push_back(i);
+            }
+            return;
+        };
+        match i {
+            Input::Key { down: false, .. } | Input::Button(_, false) | Input::Focus(_) | Input::Close => self.input.push_back(i),
+            _ => {}
+        }
+        // the mouse in the overlay's pixels (it covers the picture's 4:3 middle)
+        let i = match i {
+            Input::Move(x, y) => {
+                let (fw, fh) = self.gl.as_ref().map_or((640, 480), |g| (g.shown.1, g.shown.2));
+                let (sx, sw) = overlay_span(fw, fh);
+                Input::Move((x - sx as i32) * super::menu::W / sw.max(1) as i32, y * super::menu::H / fh.max(1) as i32)
+            }
+            i => i,
+        };
+        menu.fullscreen = full;
+        let mut acts = Vec::new();
+        let closed = menu.input(&i, &mut acts).is_err();
+        for a in acts {
+            let Some(w) = &self.window else { continue };
+            match a {
+                Action::Fullscreen(on) => {
+                    w.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                    crate::settings::update(|s| s.fullscreen = on);
+                }
+                Action::Window(_) if w.fullscreen().is_some() => {}
+                Action::Window(Some((ww, wh))) => drop(w.request_inner_size(winit::dpi::PhysicalSize::new(ww, wh))),
+                Action::Window(None) => drop(w.request_inner_size(LogicalSize::new(1280.0, 960.0))),
+            }
+        }
+        if closed {
+            self.menu = None;
+            if let Some(gl) = &mut self.gl {
+                gl.overlay(None);
+            }
+            self.overlay_changed = true;
+            self.draw();
+            self.catch_cursor();
+        } else {
+            self.show_menu();
+        }
+    }
+
+    /// Our menu drawn into the overlay.
+    fn show_menu(&mut self) {
+        let (Some(m), Some(gl)) = (&self.menu, &mut self.gl) else { return };
+        gl.overlay(Some((&m.render(), super::menu::W as u32, super::menu::H as u32)));
+        self.overlay_changed = true;
+        self.draw();
     }
 
     fn create(&mut self, el: &ActiveEventLoop) {
@@ -689,7 +755,7 @@ impl App {
     fn catch_cursor(&mut self) {
         let Some(win) = &self.window else { return };
         // a scripted test run leaves the mouse to the user
-        let catch = self.focused && CURSOR_HIDDEN.load(Ordering::Relaxed) && !scripted_run();
+        let catch = self.focused && CURSOR_HIDDEN.load(Ordering::Relaxed) && !scripted_run() && self.menu.is_none();
         let hide = catch;
         if hide != self.cursor_hidden {
             self.cursor_hidden = hide;
@@ -733,7 +799,7 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, e: winit::event::DeviceEvent) {
         // DirectInput's mouse is relative: the raw motion, while the window has the focus
         if let winit::event::DeviceEvent::MouseMotion { delta } = e {
-            if self.focused && !scripted_run() {
+            if self.focused && !scripted_run() && self.menu.is_none() {
                 super::dinput::motion(delta.0.round() as i32, delta.1.round() as i32);
             }
         }

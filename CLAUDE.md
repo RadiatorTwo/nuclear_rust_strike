@@ -170,8 +170,18 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   written whole with comments at the first start and on every change: `update`); wrong values
   keep the default and are reported. `get()` = the file with `NSTRIKE_WINDOW`,
   `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER` over it (not
-  saved). The game's own settings stay in its Config menu / nukepc.sav. Plan: an overlay menu
-  of ours for these; the game's menu is not extended, except for what it has (resolution).
+  saved). The game's own settings stay in its Config menu / nukepc.sav; the game's menu is
+  not extended, except for what it has (resolution).
+- `src/platform/menu.rs` (new): our menu, F10 (VK 0x79, not passed to the game). Drawn into
+  the window's overlay (640x480 ARGB, over the picture's 4:3 middle; font `font.rs` from
+  future_rust_cop). `window.rs` owns the `Menu` while open: `App::push` hands it all input
+  (mouse moves converted to overlay pixels), the game gets only keys/buttons going up, focus
+  and close; raw mouse motion is held back, the cursor shown and released. Changes apply at
+  once (`frames::set_rate`, `glide::set_msaa/set_filtering`, fullscreen and window size by
+  the window) and are saved. While open, the mission loop waits in `logic_frame_us`
+  (`menu::wait_closed`, drawing pictures so changes show) and its clock start moves on by
+  the pause. Menus outside missions keep running. `NSTRIKE_INPUT` items go through it too
+  (`50000:F10 52000:Down 53000:Right`).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

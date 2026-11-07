@@ -17,21 +17,16 @@
 use super::kernel32::guest_us;
 use super::{log, mem};
 use crate::rt::{call_original, Cpu, EAX, ESP};
+use crate::settings::FrameRate;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Frames a second times 1000 (the settings' `frame_rate`: else the display's refresh rate,
 /// else 60); 0: unlimited.
 fn rate_mhz() -> u32 {
-    use crate::settings::FrameRate;
-    static SET: OnceLock<FrameRate> = OnceLock::new();
-    let set = *SET.get_or_init(|| {
+    let set = *RATE.lock().unwrap().get_or_insert_with(|| {
         let r = crate::settings::get().frame_rate;
-        match r {
-            FrameRate::Unlimited => log!("frame rate: unlimited"),
-            FrameRate::Fps(n) => log!("frame rate: {n} fps"),
-            FrameRate::Display => log!("frame rate: the display's refresh rate"),
-        }
+        log_rate(r);
         r
     });
     match set {
@@ -39,6 +34,24 @@ fn rate_mhz() -> u32 {
         FrameRate::Fps(n) => n * 1000,
         FrameRate::Display => Some(super::window::refresh_mhz()).filter(|&r| r > 0).unwrap_or(60_000),
     }
+}
+
+/// The frame rate in effect (read from the settings at the first frame).
+static RATE: Mutex<Option<FrameRate>> = Mutex::new(None);
+
+fn log_rate(r: FrameRate) {
+    match r {
+        FrameRate::Unlimited => log!("frame rate: unlimited"),
+        FrameRate::Fps(n) => log!("frame rate: {n} fps"),
+        FrameRate::Display => log!("frame rate: the display's refresh rate"),
+    }
+}
+
+/// The frame rate changed (our menu): saved, and used from the next picture on.
+pub fn set_rate(r: FrameRate) {
+    crate::settings::update(|s| s.frame_rate = r);
+    *RATE.lock().unwrap() = Some(r);
+    log_rate(r);
 }
 
 /// The time the next picture is due (None: unlimited, or none shown yet).
@@ -111,6 +124,13 @@ pub fn next_shown() -> Instant {
 /// µs: whole 1/60 s from the mission's start. A computer too slow for 60 runs fewer frames,
 /// each a whole number of 1/60 s long.
 fn logic_frame_us(c: &mut Cpu) -> u64 {
+    // our menu open: the mission stands still (pictures go on), its clock too
+    if super::menu::is_open() {
+        let paused = super::menu::wait_closed(|| super::pictures::picture(c));
+        if let Some(l) = LOGIC.lock().unwrap().as_mut() {
+            l.start += paused;
+        }
+    }
     let due = {
         let mut l = LOGIC.lock().unwrap();
         let Some(l) = l.as_mut() else {
