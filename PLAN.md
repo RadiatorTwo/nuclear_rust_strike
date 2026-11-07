@@ -68,6 +68,10 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       another thread (it was invisible: 8 s of "loading"); a wrong palette from it may have
       been the garbled Config text. Textures are clamped to the primitive's rectangle (marks
       over letters at high resolution)
+- [x] Frame rate unlocked: paced at the display's refresh rate (`NSTRIKE_FRAMERATE`), the
+      game's clock in µs at the frame's due time (it moved in 10 ms steps: shaking at 60 fps),
+      the camera's smoothing by fractions of 1/60 s. Physics checked: same speed at any rate
+- [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
 
 ### 4. Later

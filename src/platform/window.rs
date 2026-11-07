@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use super::gl::Gl;
 use super::log;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::ThreadId;
 use std::time::Duration;
@@ -566,6 +566,19 @@ pub fn display_modes() -> ((u32, u32), Vec<(u32, u32)>) {
     })
 }
 
+/// The refresh rate of the window's display in mHz (0: not known yet).
+static REFRESH: AtomicU32 = AtomicU32::new(0);
+
+pub fn refresh_mhz() -> u32 {
+    REFRESH.load(Ordering::Relaxed)
+}
+
+fn note_refresh(w: &Window) {
+    if let Some(r) = w.current_monitor().and_then(|m| m.refresh_rate_millihertz()) {
+        REFRESH.store(r, Ordering::Relaxed);
+    }
+}
+
 /// Is the window fullscreen?
 pub fn is_fullscreen() -> bool {
     on_main() && with_host(|h| h.app.window.as_ref().is_some_and(|w| w.fullscreen().is_some()))
@@ -655,6 +668,7 @@ impl App {
         if !scripted_run() {
             win.focus_window();
         }
+        note_refresh(&win);
         self.window = Some(win);
         self.gl = Some(gl);
         if let Some((px, w, h)) = self.early.take() {
@@ -730,6 +744,11 @@ impl ApplicationHandler for App {
                     let _ = w.set_cursor_grab(CursorGrabMode::None);
                 }
                 self.push(Input::Focus(f));
+            }
+            WindowEvent::Moved(_) => {
+                if let Some(w) = &self.window {
+                    note_refresh(w);
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(gl) = &self.gl {

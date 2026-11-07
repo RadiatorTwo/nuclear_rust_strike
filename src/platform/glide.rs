@@ -1454,25 +1454,10 @@ fn buffer_clear(c: &mut Cpu) -> u32 {
     0
 }
 
-/// The card's vertical retrace: 60 Hz.
-const RETRACE: std::time::Duration = std::time::Duration::from_nanos(1_000_000_000 / 60);
-
-/// grBufferSwap(swap_interval): a picture at most every `interval` retraces, as the card's swap
-/// waits for them (the game asks for 1, 0 only in one mode); without the wait the menu ran at
-/// hundreds of frames.
+/// grBufferSwap(swap_interval): the card's swap waited for its retrace; the pace is
+/// `frames::pace` (without a wait the menu ran at hundreds of frames).
 fn buffer_swap(c: &mut Cpu) -> u32 {
-    use std::time::Instant;
-    static NEXT: Mutex<Option<Instant>> = Mutex::new(None);
-    let interval = arg(c, 0);
-    if interval > 0 {
-        let now = Instant::now();
-        let at = NEXT.lock().unwrap().filter(|&t| t > now);
-        if let Some(t) = at {
-            std::thread::sleep(t - now);
-        }
-        // the next one: a retrace after this, or after now if the game fell behind
-        *NEXT.lock().unwrap() = Some(at.unwrap_or(now) + RETRACE * interval);
-    }
+    super::frames::pace(arg(c, 0));
     let shown = with(|g, gl| {
         g.flush(gl);
         g.resolve(gl);

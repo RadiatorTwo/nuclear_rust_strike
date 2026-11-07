@@ -10,6 +10,7 @@ pub mod advapi32;
 pub mod ddraw;
 pub mod dinput;
 pub mod dsound;
+pub mod frames;
 pub mod gdi32;
 pub mod gl;
 pub mod glide;
@@ -638,7 +639,12 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// Game functions replaced by our own (`jit::compile`).
-pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear), (glide::COPY_BITMAP, glide::copy_bitmap)];
+pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear), (glide::COPY_BITMAP, glide::copy_bitmap),
+    (frames::UPDATE_TICK, frames::update_tick),
+    (frames::CAM_UPDATE, frames::cam_update),
+    (frames::SLERP, frames::slerp),
+    (frames::RLERP, frames::rlerp),
+];
 
 /// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector
 /// for VGA memory (0xa0000) by reading the GDT and LDT (sgdt/sldt). There is no VGA memory

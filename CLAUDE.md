@@ -87,6 +87,15 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   are threads calling `callback(user)`; MIDI messages are dropped (`NSTRIKE_MIDI_LOG=1`).
   Without Miles the game stops: "Unable to initialize audio system". `NSTRIKE_AIL_LOG=1`.
 - `dsound.rs`: the primary buffer reports 64 KB (the movie player sizes its buffer by it).
+- `frames.rs` (new): frame rate and the game's clock. sysUpdateTick_ (0x4823d0) is hooked: the
+  clock in µs (the game's `clock_` is GetTickCount/10: 10 ms steps made 60 fps frames move the
+  world by 10 or 20 ms in turn), read at the time the frame is due (`pace`), so steady frames
+  get steady steps. `[0x4ed72c]` (1/(60*256) s) drives physics and AI by elapsed time:
+  helicopter speed is the same at 60, 144 and ~350 fps. `[0x4ed720]` (whole 1/60 s) drives the
+  camera's smoothing: StrkCam_Update_, Slerp_, Rlerp_ hooked to step by the fraction too.
+  `[0x54d914]` may be 0 (the original's minimum 1 ran menu movies fast above 100 fps). The pace
+  at grBufferSwap: the display's refresh rate (`window::refresh_mhz`), or `NSTRIKE_FRAMERATE`
+  (0 unlimited). `NSTRIKE_FPS=1` logs frames a second and the slowest frame.
 - `rt_yield(cpu, loop head)`: `NSTRIKE_WATCH=` logs the last loop head a spinning thread
   yielded at, `NSTRIKE_WATCH=568b14,...` also dwords of guest memory, every 2 s.
 - Fault reports name the nearest compiled function below the host address: a hooked
@@ -112,7 +121,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.
 - Environment variables are `NSTRIKE_*` (Future Cop's `FCOP_*`): `NSTRIKE_TRACE_API` (`1`
   every import, else those whose name contains the value: `NSTRIKE_TRACE_API=glide2x`),
-  `NSTRIKE_PROF`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
+  `NSTRIKE_PROF`, `NSTRIKE_FPS`, `NSTRIKE_FRAMERATE`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
   (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT` (`move@x,y` also moves
   DirectInput's mouse; with it set the window does not catch the mouse or take the foreground), `NSTRIKE_WINDOW`.
 
