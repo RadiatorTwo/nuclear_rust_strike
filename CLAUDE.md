@@ -73,7 +73,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `image.rs`: a section with raw offset 0 (Watcom's .bss) is uninitialised: zeros.
 - `platform/mod.rs`: the game sees itself at `C:\NUKEPC\NUKEPC.EXE` (the command line too:
   it takes its folder from it) and the CD as D: (`D:\worlds` = `data\Worlds`);
-  SetCurrentDirectoryA is followed (`guest_parts`). HOOKS: SelectorFromLinearAddress_.
+  SetCurrentDirectoryA is followed (`guest_parts`). HOOKS: SelectorFromLinearAddress_,
+  gl_CopyBitmap_ (`glide.rs`).
 - `kernel32.rs`: VirtualAlloc is 64 KB aligned (Windows' granularity): the game's memory
   manager SSMem (0x440dd0...) breaks its free list otherwise (SSMemAllocAlign's padding).
   DeviceIoControl (MEMVXD) fails; SuspendThread is ignored.
@@ -97,7 +98,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `show_texture` from there finishes and hands the texture over (`SHOW`). The game's Glide
   layer is `gl_*` (0x478cc8...): `gl_ScaledTransferToLFB_` draws 16-bit pictures (movies,
   menu backgrounds) as 128x128 tiles, `gl_CopyBitmap_` saves what is under the cursor with
-  grLfbReadRegion, `gl_SetTMUPaletteRange_` the palette. `NSTRIKE_GLIDE_LOG=1` logs downloads.
+  grLfbReadRegion (hooked: the save is kept on the GPU and drawn back from there, flags 7 save,
+  6 restore, 0xa the cursor itself), `gl_SetTMUPaletteRange_` the palette. `NSTRIKE_GLIDE_LOG=1` logs downloads.
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

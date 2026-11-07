@@ -51,8 +51,9 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 - [x] Front, back and aux buffers that really swap; grLfbReadRegion/WriteRegion (the cursor
       saves what is under it per buffer: no trails). A region read and written back unchanged
       is copied on the GPU at full resolution
-- [ ] What the cursor restores is read at 640x480 in RGB565: slightly blurred at high
-      resolution. Movies look purple (EA logo fine): their colours, or a format question?
+- [x] The cursor's known flaw on modern systems (what it puts back is not the background):
+      `gl_CopyBitmap_` hooked, the background it saves is kept on the GPU at full resolution
+      and drawn back from there. The movies' purple look is their own
 - [ ] Miles streaming (AIL_sample_buffer_ready/load_sample_buffer, through pointers)
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
 

@@ -25,7 +25,7 @@
 
 use super::gl::{compile, texture};
 use super::{arg, log, mem, thunk, thunk_not_implemented};
-use crate::rt::{Cpu, EDX};
+use crate::rt::{Cpu, EAX, EBX, ECX, EDX, ESP};
 use glow::HasContext;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -194,7 +194,23 @@ struct Glide {
     /// the last grLfbReadRegion, so that writing what it read back to a buffer copies on
     /// the GPU at full resolution
     last_read: Option<LfbRead>,
+    /// pictures `gl_CopyBitmap_` saved from the back buffer (what is under the cursor), at the
+    /// target's resolution, newest last
+    saved: Vec<Saved>,
 }
+
+/// A rectangle of the back buffer saved by `gl_CopyBitmap_`: where its pixels went in guest
+/// memory and what they were, and the rectangle as a texture.
+struct Saved {
+    data: u32,
+    stride: u32,
+    size: (u32, u32),
+    bytes: Vec<u8>,
+    tex: glow::Texture,
+}
+
+/// Saved pictures kept at most.
+const SAVED: usize = 8;
 
 /// A grLfbReadRegion: the buffer and rectangle read, where to, and the bytes written there.
 struct LfbRead {
@@ -638,6 +654,7 @@ impl Glide {
                 copy_prog: compile(gl, COPY_VS, COPY_FS),
                 copy_vao: gl.create_vertex_array().expect("GL vertex array"),
                 last_read: None,
+                saved: Vec::new(),
             }
         }
     }
@@ -882,6 +899,49 @@ impl Glide {
             self.copy(gl, t, [0.0, 1.0, 1.0, 0.0], fbo, rect);
             gl.delete_texture(t);
         }
+    }
+
+    /// Keep the back buffer's rectangle `rect` (Glide pixels) as a texture, for the pixels
+    /// just read to `data` (see `copy_bitmap`).
+    fn save(&mut self, gl: &glow::Context, rect: [u32; 4], data: u32, stride: u32) {
+        let (fbo, _) = self.read_buffer(gl, 1);
+        let [x, y, w, h] = self.target_rect(rect);
+        let tex = unsafe {
+            let tmp = new_buffer(gl, w.max(1) as u32, h.max(1) as u32);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(tmp.0));
+            gl.blit_framebuffer(x, y, x + w, y + h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.delete_framebuffer(tmp.0);
+            tmp.1
+        };
+        let m = mem();
+        let row = (rect[2] * 2) as usize;
+        let bytes = (0..rect[3]).flat_map(|r| m.slice(data + r * stride, row).to_vec()).collect();
+        if let Some(k) = self.saved.iter().position(|sv| sv.data == data) {
+            unsafe { gl.delete_texture(self.saved.remove(k).tex) };
+        }
+        if self.saved.len() >= SAVED {
+            unsafe { gl.delete_texture(self.saved.remove(0).tex) };
+        }
+        self.saved.push(Saved { data, stride, size: (rect[2], rect[3]), bytes, tex });
+    }
+
+    /// Draw a saved picture back into the back buffer at (x, y) if `data` still holds what was
+    /// saved there (the whole picture: `size`); false if there is none.
+    fn restore(&mut self, gl: &glow::Context, at: (u32, u32), size: (u32, u32), data: u32, stride: u32) -> bool {
+        let m = mem();
+        let Some(sv) = self.saved.iter().find(|sv| (sv.data, sv.stride, sv.size) == (data, stride, size)) else { return false };
+        let row = (size.0 * 2) as usize;
+        if !(0..size.1).all(|r| *m.slice(data + r * stride, row) == sv.bytes[r as usize * row..][..row]) {
+            return false;
+        }
+        let tex = sv.tex;
+        let rect = self.target_rect([at.0, at.1, size.0, size.1]);
+        let fbo = self.draw_fbo();
+        self.copy(gl, tex, [0.0, 0.0, 1.0, 1.0], fbo, rect);
+        true
     }
 
     /// Draw what is batched with the current state.
@@ -1230,6 +1290,9 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
             gl.delete_framebuffer(fbo);
             gl.delete_texture(t);
         }
+        for sv in g.saved.drain(..) {
+            gl.delete_texture(sv.tex);
+        }
         gl.delete_program(g.copy_prog);
         gl.delete_vertex_array(g.copy_vao);
         gl.delete_texture(g.array);
@@ -1491,6 +1554,41 @@ fn alpha_test_reference(c: &mut Cpu) -> u32 {
     let v = arg(c, 0) & 0xff;
     with(|g, gl| g.set(gl, |s| s.alpha_test.1 = v));
     0
+}
+
+/// The game's `gl_CopyBitmap_(eax bitmap, edx pixels, ebx stride, ecx x, [esp+4] y,
+/// [esp+8] flags)`: flags bit 0 saves the back buffer's rectangle under the bitmap's size into
+/// the pixels (grLfbReadRegion, at 640x480 in RGB565), else the pixels are drawn there as
+/// 128x128 textures. On the card the two give back the same pixels; here the target has more
+/// of them, and what the cursor puts back (the background it saved) came out blurred and a
+/// little darker. So a save also keeps the rectangle on the GPU, and drawing back pixels that
+/// are still what was saved draws that instead.
+pub const COPY_BITMAP: u32 = 0x47a360;
+
+pub fn copy_bitmap(c: &mut Cpu) {
+    let m = mem();
+    let (bitmap, data, stride, x) = (c.r[EAX], c.r[EDX], c.r[EBX], c.r[ECX] & 0xffff);
+    let (y, flags) = (m.rd32(c.r[ESP] + 4) & 0xffff, m.rd32(c.r[ESP] + 8));
+    // the bitmap: x and y of the part drawn, its width and height (16 bits each)
+    let (bx, by, w, h) = (m.rd16(bitmap), m.rd16(bitmap + 2), m.rd16(bitmap + 4) as u32, m.rd16(bitmap + 6) as u32);
+    if trace() {
+        log!("glide: gl_CopyBitmap {x},{y} {w}x{h} part at {bx},{by} pixels {data:#x} stride {stride} flags {flags:#x}");
+    }
+    if flags & 1 != 0 {
+        crate::rt::call_original(c, COPY_BITMAP);
+        if c.r[EAX] & 0xff != 0 {
+            with(|g, gl| g.save(gl, [x, y, w, h], data, stride));
+        }
+        return;
+    }
+    // drawn back as it was (flag 8: with the chroma key, the cursor itself)
+    if (bx, by) == (0, 0) && flags & 8 == 0 && with(|g, gl| g.restore(gl, (x, y), (w, h), data, stride)) == Some(true) {
+        c.r[EAX] = (c.r[EAX] & !0xff) | 1;
+        // ret 8
+        c.r[ESP] += 12;
+        return;
+    }
+    crate::rt::call_original(c, COPY_BITMAP);
 }
 
 /// grLfbReadRegion(src_buffer, x, y, w, h, dst_stride, dst_data)

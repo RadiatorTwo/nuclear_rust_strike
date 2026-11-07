@@ -632,7 +632,7 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// Game functions replaced by our own (`jit::compile`).
-pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear)];
+pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear), (glide::COPY_BITMAP, glide::copy_bitmap)];
 
 /// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector
 /// for VGA memory (0xa0000) by reading the GDT and LDT (sgdt/sldt). There is no VGA memory
