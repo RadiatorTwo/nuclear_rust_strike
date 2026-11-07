@@ -44,7 +44,10 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 - [x] The main menu is drawn through Glide (wrong textures, see below)
 - [x] Texture coordinates of textures smaller than 256 (s, t span 0..256 over the longer
       side): the movies' 128x128 tiles were misplaced
-- [x] P_8 / AP_88 with the palette (grTexDownloadTable/Partial), the alpha test
+- [x] P_8 / AP_88 with the palette (grTexDownloadTable/Partial), ALPHA_INTENSITY_44,
+      ARGB_8332, the alpha test; grAADraw* drawn as plain primitives
+- [x] The first mission runs (Start Game, Enter through the briefing): terrain, helicopter,
+      HUD and radar drawn right. Not played yet: controls, sound, speed unchecked
 - [x] Front, back and aux buffers that really swap; grLfbReadRegion/WriteRegion (the cursor
       saves what is under it per buffer: no trails). A region read and written back unchanged
       is copied on the GPU at full resolution

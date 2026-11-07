@@ -521,6 +521,15 @@ fn convert(format: u32, src: &[u8], palette: &[u32; 256]) -> Vec<u8> {
                 [(v >> 5) as u8 * 36, (v >> 2 & 7) as u8 * 36, (v & 3) as u8 * 85, 255]
             }
             2 => [255, 255, 255, rd8(k)],
+            4 => {
+                let v = rd8(k) as u32;
+                let i = e4(v & 15);
+                [i, i, i, e4(v >> 4)]
+            }
+            8 => {
+                let v = rd16(k) as u32;
+                [(v >> 5 & 7) as u8 * 36, (v >> 2 & 7) as u8 * 36, (v & 3) as u8 * 85, (v >> 8) as u8]
+            }
             5 => {
                 let [r, g, b] = pal(rd8(k));
                 [r, g, b, 255]
@@ -1529,6 +1538,11 @@ const FUNCTIONS: &[(&str, fn(&mut Cpu) -> u32)] = &[
     ("grBufferSwap", buffer_swap),
     ("grDrawTriangle", draw_triangle),
     ("guDrawTriangleWithClip", draw_triangle),
+    // antialiased edges: drawn as they are (MSAA smooths them)
+    ("grAADrawTriangle", draw_triangle),
+    ("guAADrawTriangleWithClip", draw_triangle),
+    ("grAADrawLine", draw_line),
+    ("grAADrawPoint", draw_point),
     ("grDrawLine", draw_line),
     ("grDrawPoint", draw_point),
     ("grClipWindow", clip_window),
