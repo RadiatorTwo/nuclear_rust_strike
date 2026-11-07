@@ -10,30 +10,31 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       CD image into `game_files/NUKEPC`)
 - [x] Discovery from CodeView publics: 3081 functions (2161 named), compiled in ~1.4 s
 - [x] Segment register moves (Watcom start-up)
-- [x] The game runs its C run-time start-up and reaches WinMain (stops at LoadIconA)
+- [x] The game runs its C run-time start-up and reaches WinMain
+- [x] Platform layer from future_rust_cop: user32 (+ MessageBoxA, DialogBoxParamA as a log),
+      window (winit), gl, gdi32, ddraw, dsound, misc; kernel32 additions; dinput (new:
+      keyboard and mouse, state and buffered data)
+- [x] Miles Sound System (`miles.rs`): samples through the dsound mixer, timers as threads,
+      MIDI handles (messages not played yet)
+- [x] Fixes the game needed: 64 KB aligned VirtualAlloc, .bss not loaded from the file,
+      command line with the path, current directory, code addresses as immediates,
+      `jmp cs:[reg + table]` jump tables, pushf/popf (16 bit), bsf/bsr, the primary sound
+      buffer's size, SelectorFromLinearAddress_ hooked (no VGA memory)
+- [x] The EA intro video plays (the game's own player, software DirectDraw)
 
 ## Open
 
 ### 1. Platform layer (next)
-Copy from future_rust_cop and adapt, in the order the game needs them:
-- [ ] user32 (window class, window, message loop, dialogs: DialogBoxParamA, MessageBoxA,
-      SetDlgItemTextA, mouse_event), `window.rs`, `gl.rs` (winit + OpenGL)
-- [ ] kernel32 missing: CopyFileA DeleteFileA GetFileSize SetCurrentDirectoryA
-      SetFileAttributesA CreateDirectoryA GetFileAttributesA lstrcmpiA SuspendThread
-      GetProcessAffinityMask SetPriorityClass InterlockedExchange GetCurrentProcessId
-      GetLocalTime GetTimeZoneInformation ReleaseMutex SetConsoleCtrlHandler TlsFree;
-      DeviceIoControl for MEMVXD.VXD (find out what the game asks of it)
-- [ ] winmm timeGetTime, wsprintfA
-- [ ] DirectDraw (software renderer and menus), DirectInput (keyboard, mouse, joystick)
-- [ ] CD check: GetVolumeInformationA (label NUKEPC?), GetDriveTypeA, `gRootCD`; where it
-      expects `worlds` and `video`
-- [ ] Registry: which keys the game reads (RegOpenKeyExA/RegQueryValueExA)
+- [ ] After the intro video: crash in the software renderer llTextureTri_ 0x4ba360 (read at
+      0xffffffd2). Glide first (the goal anyway), then software mode again
+- [ ] SuspendThread is ignored (WindowProc 0x4a13f8 suspends a thread on deactivation?)
+- [ ] Thread priorities are ignored (the movie streamer and the audio timer raise theirs)
+- [ ] Joysticks in DirectInput
 
 ### 2. Sound
-- [ ] Miles Sound System (`mss32.dll`): 36 AIL functions in Rust (digital samples, timers)
-- [ ] MIDI: AIL_midiOutOpen/send_channel_voice_message to a software synthesizer with the
-      game's SoundFont `AUD_IMS1.SF2` (e.g. the rustysynth crate)
-- [ ] DirectSoundCreate (the game also uses DirectSound)
+- [x] Miles: samples and timers (not checked by ear yet)
+- [ ] MIDI: send_channel_voice_message to a software synthesizer with the game's SoundFont
+      `AUD_IMS1.SF2` (e.g. the rustysynth crate)
 
 ### 3. Glide on OpenGL
 - [ ] `glide.rs` from future_rust_cop (LoadLibraryA("glide2x.dll") -> our module); check which

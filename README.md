@@ -10,8 +10,8 @@ No game code or data is part of this repository: you need your own copy of the g
 
 ## State
 
-Early: the game is installed from the CD image, compiled, and runs its start-up up to its
-window. See PLAN.md.
+Early: the game is installed from the CD image, compiled, and plays its intro video; the
+3D renderer (Glide on OpenGL) is next. See PLAN.md.
 
 ## Trying it
 

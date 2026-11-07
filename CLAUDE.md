@@ -29,8 +29,9 @@ window, gl, glide), copy the file, strip Future Cop's hooks and addresses, and k
 design. Its CLAUDE.md explains each copied module in detail.
 
 Copied so far: `rt.rs`, `lift.rs`, `lift/x87.rs`, `jit.rs`, `discover.rs`, `smc.rs`,
-`image.rs`, `iso.rs`, `platform/mod.rs` (core only), `platform/kernel32.rs`,
-`platform/advapi32.rs`, `examples/dis.rs`, `tests/` (x87, smc).
+`image.rs`, `iso.rs`, `platform/mod.rs` (core only), `kernel32`, `advapi32`, `user32`,
+`gdi32`, `ddraw`, `dsound`, `misc`, `window`, `gl`, `examples/dis.rs`, `tests/` (x87, smc).
+Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display settings.
 
 ## The game
 
@@ -67,11 +68,34 @@ Copied so far: `rt.rs`, `lift.rs`, `lift/x87.rs`, `jit.rs`, `discover.rs`, `smc.
   steps** (Watcom's XI/YI start-up tables have 6-byte entries).
 - `lift.rs`: segment registers in mov/push/pop read as flat selectors (CS 0x1b, FS 0x3b,
   GS 0, else 0x23), writes are dropped (Watcom's start-up, `push ds; pop es`).
+- `discover.rs` also takes 32-bit immediates pointing at not yet decoded code as entries
+  (`push offset thread_proc`), and `jmp cs:[reg + table]` (reg = index*4) as jump tables.
+- `image.rs`: a section with raw offset 0 (Watcom's .bss) is uninitialised: zeros.
+- `platform/mod.rs`: the game sees itself at `C:\NUKEPC\NUKEPC.EXE` (the command line too:
+  it takes its folder from it) and the CD as D: (`D:\worlds` = `data\Worlds`);
+  SetCurrentDirectoryA is followed (`guest_parts`). HOOKS: SelectorFromLinearAddress_.
+- `kernel32.rs`: VirtualAlloc is 64 KB aligned (Windows' granularity): the game's memory
+  manager SSMem (0x440dd0...) breaks its free list otherwise (SSMemAllocAlign's padding).
+  DeviceIoControl (MEMVXD) fails; SuspendThread is ignored.
+- `dinput.rs` (new): system keyboard (DIK codes from `user32::poll`) and mouse (raw motion
+  from winit's DeviceEvent), GetDeviceState and buffered GetDeviceData. `NSTRIKE_DI_LOG=1`.
+- `miles.rs` (new): AIL_* on the dsound mixer (`dsound::Sample`: linear gain, signed 8-bit,
+  loop counts); the driver's +0x4c is an IDirectSound (the movie player uses it); timers
+  are threads calling `callback(user)`; MIDI messages are dropped (`NSTRIKE_MIDI_LOG=1`).
+  Without Miles the game stops: "Unable to initialize audio system". `NSTRIKE_AIL_LOG=1`.
+- `dsound.rs`: the primary buffer reports 64 KB (the movie player sizes its buffer by it).
+- `rt_yield(cpu, loop head)`: `NSTRIKE_WATCH=` logs the last loop head a spinning thread
+  yielded at, `NSTRIKE_WATCH=568b14,...` also dwords of guest memory, every 2 s.
+- Fault reports name the nearest compiled function below the host address: a hooked
+  function's original is not in that table, so a fault in it names the function before it.
+- Debugging that worked: hooks logging the game's own functions (SSMemAlloc_ ...), and
+  write-protecting a guest page (VirtualProtect on `mem().base + a`) to catch the writer.
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.
 - Environment variables are `NSTRIKE_*` (Future Cop's `FCOP_*`): `NSTRIKE_TRACE_API`,
-  `NSTRIKE_PROF`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`.
+  `NSTRIKE_PROF`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
+  (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT`, `NSTRIKE_WINDOW`.
 
 ## Commands
 
