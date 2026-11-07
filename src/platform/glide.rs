@@ -908,8 +908,10 @@ impl Glide {
             gl.bind_vertex_array(Some(vao));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.uniform_1_i32(gl.get_uniform_location(self.copy_prog, "img").as_ref(), 0);
-            gl.uniform_4_f32(gl.get_uniform_location(self.copy_prog, "src").as_ref(), src[0], src[1], src[2], src[3]);
+            // asked of the driver once: NVIDIA's lookup made system calls, 11% of the game
+            // thread at a copy a frame
+            gl.uniform_1_i32(super::gl::uniform(gl, self.copy_prog, "img").as_ref(), 0);
+            gl.uniform_4_f32(super::gl::uniform(gl, self.copy_prog, "src").as_ref(), src[0], src[1], src[2], src[3]);
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
@@ -1426,7 +1428,7 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         for sv in g.saved.drain(..) {
             gl.delete_texture(sv.tex);
         }
-        gl.delete_program(g.copy_prog);
+        super::gl::delete_program(gl, g.copy_prog);
         gl.delete_program(g.prog);
         gl.delete_buffer(g.vbo);
     });

@@ -1,8 +1,10 @@
 //! `NSTRIKE_SAMPLE=1`: where the game thread spends its time. A host thread stops the thread
 //! that swaps Glide's buffers some 2000 times a second, reads its instruction pointer and
 //! counts it for the recompiled function it is in (the nearest start below it; hooked
-//! originals count for the function before them). Every 2 s the top functions are logged;
-//! "host" is our own code (imports, Glide, the runtime).
+//! originals count for the function before them), or the host module. In system code the
+//! thread's stack is copied while it stands and unwound afterwards (unwinding a stopped
+//! thread can wait for a lock it holds), up to the first frame in our code: "ntdll <-
+//! nvoglv64 <- nstrike.exe+off". Every 2 s the top entries are logged.
 use super::log;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -33,7 +35,8 @@ pub fn start() {}
 
 #[cfg(windows)]
 fn sample(h: windows_sys::Win32::Foundation::HANDLE) {
-    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT, CONTEXT_CONTROL_AMD64};
+    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, ReadProcessMemory, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT, CONTEXT_FULL_AMD64, UNW_FLAG_NHANDLER};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use windows_sys::Win32::System::Threading::{ResumeThread, SuspendThread};
     let Some(d) = crate::rt::DISPATCH.get() else { return };
     let mut starts: Vec<(usize, u32)> = d.table.iter().map(|&(g, p)| (p, g)).collect();
@@ -42,50 +45,77 @@ fn sample(h: windows_sys::Win32::Foundation::HANDLE) {
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut modules = HashMap::new();
     let mut total = 0u32;
+    let mut stack = vec![0u8; 64 << 10];
+    let mut stack_len;
     let mut last = std::time::Instant::now();
     log!("sample: started");
     loop {
         std::thread::sleep(std::time::Duration::from_micros(500));
         let mut ctx: CONTEXT = unsafe { std::mem::zeroed() };
-        ctx.ContextFlags = CONTEXT_CONTROL_AMD64;
-        let mut caller = 0usize;
-        let rip = unsafe {
+        ctx.ContextFlags = CONTEXT_FULL_AMD64;
+        let ours = |a: u64| (lo..hi).contains(&(a as usize)) || (own_text().0..own_text().1).contains(&(a as usize));
+        unsafe {
             if SuspendThread(h) == u32::MAX {
                 return;
             }
             let ok = GetThreadContext(h, &mut ctx);
+            // in system code: its stack, copied while it stands (read without faulting)
+            let mut got = 0;
+            if ok != 0 && !ours(ctx.Rip) {
+                while got < stack.len() {
+                    let mut n = 0;
+                    let p = (ctx.Rsp as usize + got) as *const std::ffi::c_void;
+                    let chunk = (4096 - (p as usize & 4095)).min(stack.len() - got);
+                    if ReadProcessMemory(GetCurrentProcess(), p, stack[got..].as_mut_ptr().cast(), chunk, &mut n) == 0 {
+                        break;
+                    }
+                    got += n;
+                }
+            }
             ResumeThread(h);
             if ok == 0 {
                 log!("sample: GetThreadContext failed: {}", std::io::Error::last_os_error());
                 return;
             }
-            // in system code: the first return address on the stack into our own code (in
-            // its .text, after a call instruction). No unwinding: its locks may be held by
-            // the stopped thread.
-            let (t0, t1) = own_text();
-            if !(t0..t1).contains(&(ctx.Rip as usize)) && !(lo..hi).contains(&(ctx.Rip as usize)) {
-                let sp = ctx.Rsp as usize as *const usize;
-                for i in 0..1024 {
-                    let v = sp.add(i).read_volatile();
-                    if (t0 + 8..t1).contains(&v) && after_call(v) {
-                        caller = v;
-                        break;
-                    }
+            stack_len = got;
+        }
+        let rip = ctx.Rip as usize;
+        let name = |a: usize, modules: &mut HashMap<usize, Option<(usize, String)>>| {
+            if (lo..hi).contains(&a) {
+                let i = starts.partition_point(|s| s.0 <= a);
+                if i == 0 { "?".to_string() } else { crate::image::named(starts[i - 1].1) }
+            } else {
+                module_of(a, modules)
+            }
+        };
+        let mut key = name(rip, &mut modules);
+        if !ours(ctx.Rip) && stack_len > 0 {
+            // unwound on the copy, up to the first frame in our code or the game's
+            let base = stack.as_ptr() as u64;
+            let mut c = ctx;
+            c.Rsp = base;
+            for _ in 0..8 {
+                let mut image = 0u64;
+                let f = unsafe { RtlLookupFunctionEntry(c.Rip, &mut image, std::ptr::null_mut()) };
+                if !(base..base + stack_len as u64 - 8).contains(&c.Rsp) {
+                    break;
+                }
+                if f.is_null() {
+                    c.Rip = unsafe { *(c.Rsp as *const u64) };
+                    c.Rsp += 8;
+                } else {
+                    let (mut data, mut frame) = (std::ptr::null_mut(), 0u64);
+                    unsafe { RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, f, &mut c, &mut data, &mut frame, std::ptr::null_mut()) };
+                }
+                if c.Rip == 0 {
+                    break;
+                }
+                key = format!("{key} <- {}", name(c.Rip as usize, &mut modules));
+                if ours(c.Rip) {
+                    break;
                 }
             }
-            ctx.Rip as usize
-        };
-        let key = if (lo..hi).contains(&rip) {
-            let i = starts.partition_point(|s| s.0 <= rip);
-            if i == 0 { "?".to_string() } else { crate::image::named(starts[i - 1].1) }
-        } else {
-            let m = module_of(rip, &mut modules);
-            match caller {
-                0 => m,
-                c if (lo..hi).contains(&c) => format!("{m} <- {}", crate::image::named(starts[starts.partition_point(|s| s.0 <= c) - 1].1)),
-                c => format!("{m} <- {}", module_of(c, &mut modules)),
-            }
-        };
+        }
         *counts.entry(key).or_default() += 1;
         total += 1;
         if last.elapsed().as_secs() >= 2 {
@@ -147,10 +177,4 @@ fn own_text() -> (usize, usize) {
         }
         (0, 0)
     })
-}
-
-/// Is there a call instruction just before `a` (call rel32, call [rip+disp32], call reg/[reg])?
-fn after_call(a: usize) -> bool {
-    let b = |k: usize| unsafe { *((a - k) as *const u8) };
-    b(5) == 0xe8 || (b(6) == 0xff && b(5) == 0x15) || (b(2) == 0xff && (b(1) & 0x38) == 0x10) || (b(3) == 0xff && (b(2) & 0x38) == 0x10)
 }

@@ -108,8 +108,19 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `NSTRIKE_SAMPLE=1` (`sample.rs`): a sampling profiler of the game thread (function or host
   module, every 2 s; `NSTRIKE_SAMPLE_RAW=<file>` all samples, our own code as `nstrike.exe+off`:
   symbolise with a build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and
-  llvm-symbolizer). Left: the projection routines (vec3fp16_Project*ListASM_, x87 with the
-  stack in memory) ~22%.
+  llvm-symbolizer; in system code the stack is unwound to our frame: "ntdll <- nvoglv64 <-
+  nstrike.exe+off").
+- x87 registers cached (2026-11-07, ~415 -> ~520 fps with the next item): `lift/x87.rs`
+  `Cache` keeps ST(i) as Cranelift values along straight runs of instructions (by place
+  relative to TOP at the run's start), with the control word and its rounding tests (`Mode`);
+  written back by `x87_settle` before join points (`Lifter::joins`: branch targets), anything
+  not a plain integer instruction, helpers. Off in functions with jump tables or rewritten
+  instructions. fild/fistp qword's exact integer stays in memory, not moved by fxch.
+  `tests/x87_cache.rs` runs random x87 chains cached and uncached (`lift::X87_CACHE`) and
+  compares. glGetUniformLocation in `Glide::copy` (a frame's MSAA copy) cost 11%: NVIDIA's
+  lookup makes system calls; `gl::uniform` caches. `NSTRIKE_DUMP=<hex addr>` disassembles a
+  function's compiled code (the cache file is not read). Left: guest code ~68% of the game
+  thread, the projection routines (vec3fp16_Project*ListASM_) ~25%.
 - `rt_yield(cpu, loop head)`: `NSTRIKE_WATCH=` logs the last loop head a spinning thread
   yielded at, `NSTRIKE_WATCH=568b14,...` also dwords of guest memory, every 2 s.
 - Fault reports name the nearest compiled function below the host address: a hooked
@@ -135,7 +146,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.
 - Environment variables are `NSTRIKE_*` (Future Cop's `FCOP_*`): `NSTRIKE_TRACE_API` (`1`
   every import, else those whose name contains the value: `NSTRIKE_TRACE_API=glide2x`),
-  `NSTRIKE_PROF`, `NSTRIKE_SAMPLE`, `NSTRIKE_FPS`, `NSTRIKE_FRAMERATE`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
+  `NSTRIKE_PROF`, `NSTRIKE_SAMPLE`, `NSTRIKE_DUMP`, `NSTRIKE_FPS`, `NSTRIKE_FRAMERATE`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
   (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT` (`move@x,y` also moves
   DirectInput's mouse; with it set the window does not catch the mouse or take the foreground), `NSTRIKE_WINDOW`.
 

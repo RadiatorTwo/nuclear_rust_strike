@@ -17,7 +17,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, ModuleReloc, ModuleRelocTarget, default_libcall_names};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -67,6 +67,7 @@ pub fn compile(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32, Hook)]
 /// it is valid for: what made it, our program and the game's EXE). A file with another key is
 /// replaced.
 pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32, Hook)], cache: Option<(&Path, [u8; 32])>) -> Compiled {
+    let cache = cache.filter(|_| std::env::var_os("NSTRIKE_DUMP").is_none());
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").unwrap();
     flags.set("is_pic", "false").unwrap();
@@ -318,6 +319,9 @@ fn compile_all(isa: &dyn cranelift_codegen::isa::TargetIsa, lifted: Vec<(u32, Fu
                     let r = match ctx.compile(isa, &mut ControlPlane::default()) {
                         Ok(_) => {
                             let c = ctx.compiled_code().unwrap();
+                            if dump_of(addr) {
+                                dump(addr, c.code_buffer());
+                            }
                             Ok(Blob {
                                 id,
                                 align: c.buffer.min_alignment as u64,
@@ -447,4 +451,26 @@ fn load(path: &Path, key: &[u8; 32]) -> Option<Vec<Blob>> {
     }
     // all of it, and nothing behind it
     (r.at == data.len()).then_some(blobs)
+}
+
+/// `NSTRIKE_DUMP=<hex address>`: the machine code compiled for that function, disassembled to
+/// stderr (with the cache file not read).
+pub fn dump_of(addr: u32) -> bool {
+    static A: OnceLock<Option<u32>> = OnceLock::new();
+    *A.get_or_init(|| std::env::var("NSTRIKE_DUMP").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())) == Some(addr)
+}
+
+fn dump(addr: u32, code: &[u8]) {
+    use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
+    let mut out = format!("== {addr:#x}: {} bytes
+", code.len());
+    let mut f = IntelFormatter::new();
+    let mut d = Decoder::with_ip(64, code, 0, DecoderOptions::NONE);
+    for i in &mut d {
+        let mut t = String::new();
+        f.format(&i, &mut t);
+        out += &format!("{:5x}  {t}
+", i.ip());
+    }
+    eprint!("{out}");
 }

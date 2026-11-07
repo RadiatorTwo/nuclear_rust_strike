@@ -18,6 +18,10 @@ use std::mem::offset_of;
 
 mod x87;
 
+/// Whether the x87 registers are cached in Cranelift values (off: every access goes to
+/// `Cpu::st`; for tests comparing the two).
+pub static X87_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// Host helpers and the guest function signature, imported into each function.
 pub struct Refs {
     pub lookup: FuncRef,
@@ -175,6 +179,10 @@ pub struct Lifter<'a, 'f> {
     dyn_block: Option<Block>,
     /// mnemonics that could not be lifted (for statistics)
     pub missing: Vec<String>,
+    /// the x87 registers in Cranelift values (see `x87::Cache`)
+    xc: x87::Cache,
+    /// instructions reached otherwise than from the one before (the cache is empty there)
+    joins: std::collections::HashSet<u32>,
 }
 
 fn mf() -> MemFlagsData {
@@ -221,6 +229,8 @@ impl<'a, 'f> Lifter<'a, 'f> {
             exits: HashMap::new(),
             dyn_block: None,
             missing: Vec::new(),
+            xc: x87::Cache::default(),
+            joins: std::collections::HashSet::new(),
         };
         l.load_state();
         l
@@ -596,6 +606,15 @@ impl<'a, 'f> Lifter<'a, 'f> {
             }
             None => self.trap(self.f.entry, TRAP_INT),
         }
+        // the x87 cache lives along straight runs of instructions: not in functions with a
+        // jump through a table (every instruction may be reached from it)
+        let indirect = addrs.iter().any(|&a| code.at(a).unwrap().flow_control() == FlowControl::IndirectBranch);
+        // nor with rewritten instructions (each version is lifted in its own branch)
+        let variants = addrs.iter().any(|a| self.smc.variants.contains_key(a));
+        self.xc.enabled = !indirect && !variants && X87_CACHE.load(std::sync::atomic::Ordering::Relaxed);
+        self.joins = addrs.iter().filter_map(|&a| direct_target(&code.at(a).unwrap()).filter(|&t| self.f.inside(t))).collect();
+        self.joins.insert(self.f.entry);
+        self.joins.extend(self.smc.variants.keys().copied());
         // loop heads: targets of backward branches inside the function
         let heads: std::collections::HashSet<u32> = addrs
             .iter()
@@ -662,6 +681,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let ends = match unsupported(i) {
             Some(why) => {
                 self.missing.push(why);
+                self.x87_settle();
                 self.store_state();
                 let x = self.iconst(I32, i.ip32() as i64);
                 self.b.ins().call(self.refs.unimpl, &[self.cpu, x]);
@@ -671,6 +691,9 @@ impl<'a, 'f> Lifter<'a, 'f> {
             None => self.insn(i),
         };
         if !ends {
+            if self.joins.contains(&i.next_ip32()) {
+                self.x87_settle();
+            }
             self.goto(i.next_ip32());
         }
     }
@@ -691,6 +714,18 @@ impl<'a, 'f> Lifter<'a, 'f> {
     fn insn(&mut self, i: &Instruction) -> bool {
         use Mnemonic::*;
         let m = i.mnemonic();
+        // the x87 cache stays over plain integer instructions; anything that may branch, call
+        // or reach a helper writes it back first, on the one path all later code follows
+        let plain = matches!(
+            m,
+            Mov | Movzx | Movsx | Lea | Add | Sub | Adc | Sbb | And | Or | Xor | Not | Neg | Inc | Dec | Cmp | Test | Shl | Shr
+                | Sar | Rol | Ror | Push | Pop | Xchg | Nop | Cdq | Cwde | Cbw | Cwd
+        ) || is_setcc(i)
+            || is_cmovcc(i)
+            || x87::is_x87(m);
+        if !plain || i.flow_control() != FlowControl::Next {
+            self.x87_settle();
+        }
         match i.flow_control() {
             FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => {
                 return self.jump_insn(i);
