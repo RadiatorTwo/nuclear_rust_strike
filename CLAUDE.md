@@ -113,7 +113,17 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   elsewhere, putting them back broke the heap); the terrain draws from its data as before the
   frame's own drawing. While a picture draws, the game thread keeps the turn (`hold_turn`:
   the audio timer's changes were undone, sounds went missing). `NSTRIKE_FPS=1` also logs
-  pictures a second and their swap/draw times.
+  pictures a second and their swap/draw times. A picture is drawn only when the swap it
+  will be shown at (the one after the pending one: `next_shown() + picture_period()`) comes
+  before the next logic frame is due; else that logic frame runs at once (up to a period
+  early, its clock unchanged). Before (2026-11-08), such pictures were clamped to the newest
+  frame: steps of 0.69 / 0.31 frame alternating at 120 Hz, moving things looked doubled.
+  The game thread shows its pictures itself (`window::show_texture` -> `gl::Shared::present`:
+  blit and swap with its shared context, right after `frames::pace`; `gl::PAINT` keeps the
+  window's thread from drawing at the same time, `window::LOOK` carries overlay, video and
+  window size over). The window's thread showed them at its next turn: 1.2 to 7 ms apart at
+  240 fps while their contents were 4.2 ms apart (the helicopter shook against the ground).
+  `pace` sleeps up to 1.5 ms before the due time and spins the rest (now 4.0 to 4.4 ms).
 - The chopper's autopilot (flynVehiIntrBehavior_ 0x4251dc, the hook pick-up flies it over the
   load) steps by time / 0x114 with the rest dropped: at 60 frames (256) no step ever, the
   controls stayed taken. `frames::autopilot` carries the rest. `NSTRIKE_CTRL_LOG=1` logs

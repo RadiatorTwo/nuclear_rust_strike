@@ -71,10 +71,26 @@ pub fn pace(interval: u32) {
     let now = Instant::now();
     let at = NEXT.lock().unwrap().filter(|&t| t > now);
     if let Some(t) = at {
-        std::thread::sleep(t - now);
+        // a sleep may last a millisecond longer than asked: the last part is spun (pictures
+        // came 3.7 to 4.7 ms apart at 240 fps, now ~4.2)
+        const SPIN: Duration = Duration::from_micros(1500);
+        if t - now > SPIN {
+            std::thread::sleep(t - now - SPIN);
+        }
+        while Instant::now() < t {
+            std::hint::spin_loop();
+        }
     }
     // the next one: a period after this, or after now if the game fell behind
     *NEXT.lock().unwrap() = Some(at.unwrap_or(now) + period);
+}
+
+/// The time between two pictures (zero: unlimited).
+fn picture_period() -> Duration {
+    match rate_mhz() {
+        0 => Duration::ZERO,
+        r => Duration::from_nanos(1_000_000_000_000 / r as u64),
+    }
 }
 
 /// The game's time in µs (the guest's clock): when paced, the time the frame being made is
@@ -140,9 +156,15 @@ fn logic_frame_us(c: &mut Cpu) -> u64 {
         };
         l.start + FRAME * (l.frames + 1) as u32
     };
-    // a picture while the swap before it comes well before the frame is due
+    // A picture drawn now is shown at the swap after the one pending (`next_shown`): one
+    // whose swap comes after the frame is due would show the game later than the newest
+    // logic frame, and was drawn at the newest frame's places instead (a step of 0.69 frame,
+    // then 0.31, at 120 Hz: a double image). Such a swap gets the new frame instead: the
+    // logic runs at once, up to a picture's period before it is due (its clock does not
+    // change: whole 1/60 s).
+    let period = picture_period();
     let mut n = 0;
-    while next_shown() + FRAME / 4 < due && n < 16 {
+    while next_shown() + period < due && n < 16 {
         super::pictures::picture(c);
         n += 1;
     }
@@ -150,11 +172,12 @@ fn logic_frame_us(c: &mut Cpu) -> u64 {
     let l = g.as_mut().unwrap();
     l.frames += 1;
     let now = Instant::now();
-    if now < due {
+    let start = due.checked_sub(period).unwrap_or(due);
+    if now < start {
         drop(g);
-        super::without_turn(|| std::thread::sleep(due - now));
+        super::without_turn(|| std::thread::sleep(start - now));
         g = LOGIC.lock().unwrap();
-    } else if now - due > FRAME {
+    } else if now > due && now - due > FRAME {
         // behind: on to the frame of now
         let l = g.as_mut().unwrap();
         l.frames = ((now - l.start).as_nanos() / FRAME.as_nanos()) as u64;

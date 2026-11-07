@@ -156,17 +156,12 @@ pub fn pump(wait: Duration) {
                 *SHARE_WANTED.lock().unwrap() = true;
             }
         }
-        if let Some((tex, w, hh, gamma, fence)) = SHOW.lock().unwrap().take() {
-            if let Some(gl) = &mut h.app.gl {
-                if let Some(Fence(f)) = fence {
-                    unsafe {
-                        glow::HasContext::wait_sync(&gl.gl, f, 0, glow::TIMEOUT_IGNORED);
-                        glow::HasContext::delete_sync(&gl.gl, f);
-                    }
-                }
-                gl.shown = (tex, w, hh, false, gamma);
-                h.app.draw();
-            }
+        // a picture of another thread: to show (it waits for its fence), or shown already
+        let pending = SHOW.lock().unwrap().as_ref().map(|s| s.4.is_some());
+        match pending {
+            Some(true) => h.app.draw(),
+            Some(false) => h.app.take_show(),
+            None => {}
         }
         if let Some(v) = VIDEO.lock().unwrap().take() {
             if let Some(gl) = &mut h.app.gl {
@@ -421,10 +416,35 @@ pub fn gl_ready_here() -> bool {
     on_main() || SHARED.with_borrow(|s| s.is_some())
 }
 
+/// What the window showed last (its thread's last drawing, or a picture another thread
+/// showed since): another thread shows its pictures with it.
+static LOOK: Mutex<Option<super::gl::Look>> = Mutex::new(None);
+
 /// Show a texture something rendered (first row at the bottom), w x h, with a gamma. From
-/// another thread: shown at the window thread's next pump, after its rendering (a fence).
+/// another thread: shown at once by that thread (with the window's overlay and video), and
+/// the window's thread takes it as the picture shown at its next pump. Before the window has
+/// drawn once: shown at its next pump, after the rendering (a fence).
 pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
     if !on_main() {
+        let look = *LOOK.lock().unwrap();
+        let shown = look.and_then(|mut l| {
+            l.shown = (tex, w, h, false, gamma);
+            SHARED.with_borrow(|sh| {
+                let s = sh.as_ref()?;
+                if let Some((px, pw, ph)) = s.present(&l, shot_due(false)) {
+                    write_shot(&px, pw, ph);
+                }
+                Some(l)
+            })
+        });
+        if let Some(l) = shown {
+            *LOOK.lock().unwrap() = Some(l);
+            let old = SHOW.lock().unwrap().replace((tex, w, h, gamma, None));
+            if let Some((.., Some(Fence(f)))) = old {
+                SHARED.with_borrow(|sh| sh.as_ref().map(|s| unsafe { glow::HasContext::delete_sync(&s.gl, f) }));
+            }
+            return;
+        }
         let fence = SHARED.with_borrow(|sh| {
             let s = sh.as_ref()?;
             unsafe {
@@ -647,12 +667,28 @@ impl App {
         }
     }
 
+    /// The picture another thread handed over, as the one shown (after its fence).
+    fn take_show(&mut self) {
+        let Some(gl) = &mut self.gl else { return };
+        if let Some((tex, w, hh, gamma, fence)) = SHOW.lock().unwrap().take() {
+            if let Some(Fence(f)) = fence {
+                unsafe {
+                    glow::HasContext::wait_sync(&gl.gl, f, 0, glow::TIMEOUT_IGNORED);
+                    glow::HasContext::delete_sync(&gl.gl, f);
+                }
+            }
+            gl.shown = (tex, w, hh, false, gamma);
+        }
+    }
+
     fn draw(&mut self) {
+        self.take_show();
         let (Some(win), Some(gl)) = (&self.window, &mut self.gl) else { return };
         let size = win.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
         }
+        *LOOK.lock().unwrap() = Some(gl.look(size.width, size.height));
         let want_shot = shot_due(self.overlay_changed);
         if let Some((px, w, h)) = gl.draw(size.width, size.height, want_shot) {
             write_shot(&px, w, h);

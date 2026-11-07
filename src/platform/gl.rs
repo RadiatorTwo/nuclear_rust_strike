@@ -186,6 +186,8 @@ impl Gl {
         self.has_overlay = o.is_some();
         if let Some((px, w, h)) = o {
             upload(&self.gl, self.overlay, px, w, h);
+            // the game's thread may draw it next, with its context
+            unsafe { self.gl.flush() };
         }
     }
 
@@ -203,11 +205,47 @@ impl Gl {
         }
     }
 
+    /// What the window shows, in a window of w x h.
+    pub fn look(&self, w: u32, h: u32) -> Look {
+        Look {
+            blit: self.blit,
+            shown: self.shown,
+            overlay: self.has_overlay.then_some(self.overlay),
+            video: self.video_size.map(|(vw, vh)| (self.video, vw, vh)),
+            size: (w, h),
+        }
+    }
+
     /// Draw the shown picture and the overlay into the window (w x h), letterboxed; with `shot`,
     /// read back the picture's area as 0RGB pixels.
     pub fn draw(&mut self, w: u32, h: u32, shot: bool) -> Option<(Vec<u32>, u32, u32)> {
-        let gl = &self.gl;
-        let (tex, fw, fh, words, gamma) = self.shown;
+        let _p = PAINT.lock().unwrap_or_else(|e| e.into_inner());
+        let out = paint(&self.gl, self.vao, &self.look(w, h), shot);
+        let _ = self.surface.swap_buffers(&self.context);
+        out
+    }
+}
+
+/// What the window shows: the picture (texture, size, 0RGB words or not, gamma), the overlay
+/// and a video (textures shared by all contexts), the window's size.
+#[derive(Clone, Copy)]
+pub struct Look {
+    blit: glow::Program,
+    pub shown: (glow::Texture, u32, u32, bool, f32),
+    overlay: Option<glow::Texture>,
+    video: Option<(glow::Texture, u32, u32)>,
+    pub size: (u32, u32),
+}
+
+/// One thread at a time draws into the window and swaps (the window's thread, or the game's
+/// with its shared context).
+static PAINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Draw `l` into the window's back buffer; with `shot`, read back the picture's area.
+fn paint(gl: &glow::Context, vao: glow::VertexArray, l: &Look, shot: bool) -> Option<(Vec<u32>, u32, u32)> {
+    let (w, h) = l.size;
+    {
+        let (tex, fw, fh, words, gamma) = l.shown;
         let (ox, oy, s) = super::window::fit(fw, fh, w, h);
         let (x0, y0) = (ox / w as f64 * 2.0 - 1.0, 1.0 - oy / h as f64 * 2.0);
         let (x1, y1) = (x0 + fw as f64 * s / w as f64 * 2.0, y0 - fh as f64 * s / h as f64 * 2.0);
@@ -220,10 +258,10 @@ impl Gl {
             // the window stays opaque: 2D frames' 0RGB words have alpha 0, and a compositor that
             // blends windows by their alpha (Wayland) showed what is behind through the menu
             gl.color_mask(true, true, true, false);
-            gl.use_program(Some(self.blit));
-            gl.bind_vertex_array(Some(self.vao));
+            gl.use_program(Some(l.blit));
+            gl.bind_vertex_array(Some(vao));
             gl.active_texture(glow::TEXTURE0);
-            let u = |n: &str| gl.get_uniform_location(self.blit, n);
+            let u = |n: &'static str| uniform(gl, l.blit, n);
             gl.uniform_4_f32(u("rect").as_ref(), x0 as f32, y1 as f32, x1 as f32, y0 as f32);
             gl.uniform_1_i32(u("tex").as_ref(), 0);
             gl.disable(glow::BLEND);
@@ -238,22 +276,23 @@ impl Gl {
             let (ox0, ox1) = (x0 + (x1 - x0) * sx as f64 / fw as f64, x0 + (x1 - x0) * (sx + sw) as f64 / fw as f64);
             // videos fill the window as far as their aspect allows, centred (the game placed
             // them in its 640x480 screen, briefings small and high up)
-            if let Some((vw, vh)) = self.video_size {
+            if let Some((video, vw, vh)) = l.video {
                 gl.clear(glow::COLOR_BUFFER_BIT);
                 let (vx, vy, s) = super::window::fit(vw, vh, w, h);
                 let (ax, ay) = (vx / w as f64 * 2.0 - 1.0, 1.0 - vy / h as f64 * 2.0);
                 let (bx, by) = (ax + vw as f64 * s / w as f64 * 2.0, ay - vh as f64 * s / h as f64 * 2.0);
-                gl.uniform_4_f32(u("rect").as_ref(), ax as f32, by as f32, bx as f32, ay as f32);                gl.bind_texture(glow::TEXTURE_2D, Some(self.video));
+                gl.uniform_4_f32(u("rect").as_ref(), ax as f32, by as f32, bx as f32, ay as f32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(video));
                 gl.uniform_1_i32(u("words").as_ref(), 1);
                 gl.uniform_1_i32(u("flip").as_ref(), 0);
                 gl.uniform_1_f32(u("gamma").as_ref(), 1.0);
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
-            if self.has_overlay {
+            if let Some(overlay) = l.overlay {
                 gl.uniform_4_f32(u("rect").as_ref(), ox0 as f32, y1 as f32, ox1 as f32, y0 as f32);
                 gl.enable(glow::BLEND);
                 gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.overlay));
+                gl.bind_texture(glow::TEXTURE_2D, Some(overlay));
                 gl.uniform_1_i32(u("words").as_ref(), 1);
                 gl.uniform_1_i32(u("flip").as_ref(), 0);
                 gl.uniform_1_f32(u("gamma").as_ref(), 1.0);
@@ -280,7 +319,6 @@ impl Gl {
                 .collect();
             (px, rw as u32, rh as u32)
         });
-        let _ = self.surface.swap_buffers(&self.context);
         out
     }
 }
@@ -300,7 +338,10 @@ unsafe impl Send for SharedParts {}
 /// A shared context current on its thread.
 pub struct Shared {
     pub gl: glow::Context,
-    _context: PossiblyCurrentContext,
+    context: PossiblyCurrentContext,
+    surface: *const Surface<WindowSurface>,
+    /// for drawing into the window (vertex arrays are not shared)
+    vao: glow::VertexArray,
 }
 
 impl SharedParts {
@@ -308,6 +349,23 @@ impl SharedParts {
         let context = self.context.make_current(unsafe { &*self.surface }).expect("cannot make the shared GL context current");
         let display = self.display;
         let gl = unsafe { glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s)) };
-        Shared { gl, _context: context }
+        let vao = unsafe { gl.create_vertex_array() }.expect("GL vertex array");
+        Shared { gl, context, surface: self.surface, vao }
+    }
+}
+
+impl Shared {
+    /// Draw `l` into the window and show it at once, from this thread (the window's thread
+    /// shows at its next turn: pictures came 1 to 7 ms apart instead of 4.2).
+    pub fn present(&self, l: &Look, shot: bool) -> Option<(Vec<u32>, u32, u32)> {
+        let _p = PAINT.lock().unwrap_or_else(|e| e.into_inner());
+        // Glide sets its viewport only when its view changes
+        let mut vp = [0i32; 4];
+        unsafe { self.gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp) };
+        let out = paint(&self.gl, self.vao, l, shot);
+        // SAFETY: the window's surface lives as long as the window (see SharedParts)
+        let _ = unsafe { &*self.surface }.swap_buffers(&self.context);
+        unsafe { self.gl.viewport(vp[0], vp[1], vp[2], vp[3]) };
+        out
     }
 }
