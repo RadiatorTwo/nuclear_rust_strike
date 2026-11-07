@@ -37,8 +37,16 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       `AUD_IMS1.SF2` (e.g. the rustysynth crate)
 
 ### 3. Glide on OpenGL
-- [ ] `glide.rs` from future_rust_cop (LoadLibraryA("glide2x.dll") -> our module); check which
-      of the ~120 names the game really calls
+- [x] `glide.rs` from future_rust_cop's early version (d1f9ad0: batching, mipmaps, MSAA;
+      without its later effects). The game renders on its own thread: it gets a context
+      sharing the window's (`window::with_gl`), finished pictures go to the window's thread
+      as a texture (`show_texture`)
+- [x] The main menu is drawn through Glide (wrong textures, see below)
+- [ ] Texture formats: magenta and misplaced pictures (8-bit palettised P_8 with
+      grTexDownloadTable? other formats than FCop's 1555)
+- [ ] The cursor leaves trails, black bands: grLfbLock/grLfbWriteRegion/grLfbReadRegion
+      (the menu's 2D parts?), grBufferNumPending
+- [ ] Miles streaming (AIL_sample_buffer_ready/load_sample_buffer, through pointers)
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
 
 ### 4. Later

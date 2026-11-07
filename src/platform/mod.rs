@@ -12,6 +12,7 @@ pub mod dinput;
 pub mod dsound;
 pub mod gdi32;
 pub mod gl;
+pub mod glide;
 pub mod kernel32;
 pub mod miles;
 pub mod misc;
@@ -654,6 +655,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
         let bytes = img.read(sec.va, size as usize).unwrap();
         m.slice(sec.va, bytes.len()).copy_from_slice(&bytes);
     }
+    glide::init();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
     m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);

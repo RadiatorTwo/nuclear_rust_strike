@@ -90,6 +90,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   function's original is not in that table, so a fault in it names the function before it.
 - Debugging that worked: hooks logging the game's own functions (SSMemAlloc_ ...), and
   write-protecting a guest page (VirtualProtect on `mem().base + a`) to catch the writer.
+- `glide.rs`: future_rust_cop's version d1f9ad0 (before its effects, widescreen, hooks);
+  4:3 at the window's height. The game draws Glide on its game thread, not the window's:
+  `window::with_gl` gives such a thread a context sharing the window's (`gl::Gl::share`,
+  made by the window thread at its next pump; the window's surface is shared by pointer);
+  `show_texture` from there finishes and hands the texture over (`SHOW`).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

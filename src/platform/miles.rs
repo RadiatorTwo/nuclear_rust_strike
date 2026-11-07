@@ -289,10 +289,11 @@ fn sample_status(c: &mut Cpu) -> u32 {
     st
 }
 
-/// Double-buffered streaming (AIL_load_sample_buffer / AIL_sample_buffer_ready): the game
-/// never calls them.
+/// Double-buffered streaming (AIL_load_sample_buffer / AIL_sample_buffer_ready, called
+/// through pointers): not yet; no buffer is ever ready.
 fn not_used(c: &mut Cpu) -> u32 {
-    log!("warn: a Miles streaming function was called ({:#x})", arg(c, 0));
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| log!("warn: Miles streaming (AIL_sample_buffer_ready) not implemented yet ({:#x})", arg(c, 0)));
     u32::MAX
 }
 

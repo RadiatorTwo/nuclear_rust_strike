@@ -3,7 +3,7 @@
 //! something else rendered (the Glide scene); a video and the dialog overlay go on top.
 
 use glow::HasContext;
-use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
+use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentContext, NotCurrentGlContext, PossiblyCurrentContext, Version};
 use glutin::config::GlConfig;
 use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, SwapInterval, WindowSurface};
@@ -18,8 +18,11 @@ pub const GLSL: &str = "#version 330 core\n";
 
 pub struct Gl {
     pub gl: glow::Context,
-    surface: Surface<WindowSurface>,
+    /// boxed: a shared context on another thread draws with it too (`share`)
+    surface: Box<Surface<WindowSurface>>,
     context: PossiblyCurrentContext,
+    config: glutin::config::Config,
+    raw: Option<raw_window_handle::RawWindowHandle>,
     blit: glow::Program,
     vao: glow::VertexArray,
     frame: glow::Texture,
@@ -145,6 +148,7 @@ impl Gl {
         let context = unsafe { display.create_context(&config, &attrs) }.expect("cannot create an OpenGL 3.3 context");
         let sattrs = win.build_surface_attributes(Default::default()).expect("surface attributes");
         let surface = unsafe { display.create_window_surface(&config, &sattrs) }.expect("cannot create the GL surface");
+        let surface = Box::new(surface);
         let context = context.make_current(&surface).expect("cannot make the GL context current");
         // the game paces itself
         let _ = surface.set_swap_interval(&context, SwapInterval::DontWait);
@@ -155,8 +159,21 @@ impl Gl {
         upload(&gl, frame, &vec![0; 640 * 480], 640, 480);
         let overlay = texture(&gl, true);
         let video = texture(&gl, true);
-        let g = Gl { gl, surface, context, blit, vao, frame, overlay, has_overlay: false, video, video_size: None, shown: (frame, 640, 480, true, 1.0) };
+        let g = Gl { gl, surface, context, config, raw: handle, blit, vao, frame, overlay, has_overlay: false, video, video_size: None, shown: (frame, 640, 480, true, 1.0) };
         (win, g)
+    }
+
+    /// A context sharing this one's objects (textures), for another thread: the game draws its
+    /// Glide scenes on its own thread, the window shows them on this one.
+    pub fn share(&self) -> SharedParts {
+        let attrs = ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
+            .with_profile(GlProfile::Core)
+            .with_sharing(&self.context)
+            .build(self.raw);
+        let display = self.config.display();
+        let context = unsafe { display.create_context(&self.config, &attrs) }.expect("cannot create a shared OpenGL context");
+        SharedParts { context, surface: &*self.surface, display }
     }
 
     /// Show a 2D frame of 0RGB pixels.
@@ -265,5 +282,32 @@ impl Gl {
         });
         let _ = self.surface.swap_buffers(&self.context);
         out
+    }
+}
+
+/// A shared context (`Gl::share`) on its way to the thread that uses it.
+pub struct SharedParts {
+    context: NotCurrentContext,
+    /// the window's surface: the Gl that made it lives as long as the window
+    surface: *const Surface<WindowSurface>,
+    display: glutin::display::Display,
+}
+
+// the context is made current on the receiving thread only; the surface is the window's, which
+// two contexts may draw to on two threads
+unsafe impl Send for SharedParts {}
+
+/// A shared context current on its thread.
+pub struct Shared {
+    pub gl: glow::Context,
+    _context: PossiblyCurrentContext,
+}
+
+impl SharedParts {
+    pub fn make_current(self) -> Shared {
+        let context = self.context.make_current(unsafe { &*self.surface }).expect("cannot make the shared GL context current");
+        let display = self.display;
+        let gl = unsafe { glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s)) };
+        Shared { gl, _context: context }
     }
 }

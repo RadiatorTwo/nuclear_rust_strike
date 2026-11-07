@@ -140,6 +140,21 @@ pub fn pump(wait: Duration) {
         if let Some((px, w, hh)) = PENDING.lock().unwrap().take() {
             h.app.frame(&px, w, hh);
         }
+        // a context for another thread
+        if std::mem::take(&mut *SHARE_WANTED.lock().unwrap()) {
+            if let Some(gl) = &h.app.gl {
+                *SHARE_GIVEN.lock().unwrap() = Some(gl.share());
+                SHARE_CV.notify_all();
+            } else {
+                *SHARE_WANTED.lock().unwrap() = true;
+            }
+        }
+        if let Some((tex, w, hh, gamma)) = SHOW.lock().unwrap().take() {
+            if let Some(gl) = &mut h.app.gl {
+                gl.shown = (tex, w, hh, false, gamma);
+                h.app.draw();
+            }
+        }
         if let Some(v) = VIDEO.lock().unwrap().take() {
             if let Some(gl) = &mut h.app.gl {
                 gl.video(v.as_ref().map(|(px, w, hh)| (&px[..], *w, *hh)));
@@ -334,17 +349,48 @@ pub fn present(pixels: &[u32], w: u32, h: u32) {
     with_host(|host| host.app.frame(pixels, w, h));
 }
 
-/// Run `f` with the OpenGL context (None before the window exists or off the main thread).
-pub fn with_gl<R>(f: impl FnOnce(&mut Gl) -> R) -> Option<R> {
-    if !on_main() {
-        return None;
-    }
-    with_host(|h| h.app.gl.as_mut().map(f))
+thread_local! {
+    /// another thread's context sharing the window's (the game renders on its own thread)
+    static SHARED: RefCell<Option<super::gl::Shared>> = const { RefCell::new(None) };
 }
 
-/// Show a texture something rendered (first row at the bottom), w x h, with a gamma.
+/// A thread waits for a shared context (true), which the window's thread hands over.
+static SHARE_WANTED: Mutex<bool> = Mutex::new(false);
+static SHARE_GIVEN: Mutex<Option<super::gl::SharedParts>> = Mutex::new(None);
+static SHARE_CV: std::sync::Condvar = std::sync::Condvar::new();
+/// A texture another thread rendered, to show at the window thread's next pump.
+static SHOW: Mutex<Option<(glow::Texture, u32, u32, f32)>> = Mutex::new(None);
+
+/// Run `f` with an OpenGL context: the window's on its thread, else a context sharing its
+/// objects (made at the first use, by the window's thread at its next pump). None before the
+/// window exists.
+pub fn with_gl<R>(f: impl FnOnce(&glow::Context) -> R) -> Option<R> {
+    if on_main() {
+        return with_host(|h| h.app.gl.as_ref().map(|g| f(&g.gl)));
+    }
+    SHARED.with_borrow_mut(|sh| {
+        if sh.is_none() {
+            *SHARE_WANTED.lock().unwrap() = true;
+            let mut given = SHARE_GIVEN.lock().unwrap();
+            while given.is_none() {
+                given = SHARE_CV.wait(given).unwrap();
+            }
+            *sh = given.take().map(super::gl::SharedParts::make_current);
+        }
+        sh.as_ref().map(|s| f(&s.gl))
+    })
+}
+
+/// Show a texture something rendered (first row at the bottom), w x h, with a gamma. From
+/// another thread: shown at the window thread's next pump (its rendering finished first).
 pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
     if !on_main() {
+        SHARED.with_borrow(|sh| {
+            if let Some(s) = sh {
+                unsafe { glow::HasContext::finish(&s.gl) };
+            }
+        });
+        *SHOW.lock().unwrap() = Some((tex, w, h, gamma));
         return;
     }
     with_host(|host| {
