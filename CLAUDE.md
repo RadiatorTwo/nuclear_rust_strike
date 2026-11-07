@@ -105,7 +105,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   every import, else those whose name contains the value: `NSTRIKE_TRACE_API=glide2x`),
   `NSTRIKE_PROF`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
   (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT` (`move@x,y` also moves
-  DirectInput's mouse), `NSTRIKE_WINDOW`.
+  DirectInput's mouse; with it set the window does not catch the mouse or take the foreground), `NSTRIKE_WINDOW`.
 
 ## Commands
 

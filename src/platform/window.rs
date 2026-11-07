@@ -197,6 +197,13 @@ fn scripted(input: &mut VecDeque<Input>) {
     }
 }
 
+/// A test run with scripted input (NSTRIKE_INPUT): the window does not take the foreground,
+/// the cursor is not hidden or caught, and the real mouse does not move DirectInput's.
+fn scripted_run() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var_os("NSTRIKE_INPUT").is_some())
+}
+
 /// The scripted input's items (NSTRIKE_INPUT, or the file it names with `@`), comments removed.
 pub fn script_text() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
@@ -624,7 +631,9 @@ impl App {
         let (win, gl) = Gl::new(el, attrs);
         // to the front, while our start window still has the foreground (Windows lets only the
         // foreground's process bring a window forward)
-        win.focus_window();
+        if !scripted_run() {
+            win.focus_window();
+        }
         self.window = Some(win);
         self.gl = Some(gl);
         if let Some((px, w, h)) = self.early.take() {
@@ -636,7 +645,8 @@ impl App {
     /// the focus (Windows and X11 confine it; Wayland and macOS only lock it in place).
     fn catch_cursor(&mut self) {
         let Some(win) = &self.window else { return };
-        let catch = self.focused && CURSOR_HIDDEN.load(Ordering::Relaxed);
+        // a scripted test run leaves the mouse to the user
+        let catch = self.focused && CURSOR_HIDDEN.load(Ordering::Relaxed) && !scripted_run();
         let hide = catch;
         if hide != self.cursor_hidden {
             self.cursor_hidden = hide;
@@ -680,7 +690,7 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, e: winit::event::DeviceEvent) {
         // DirectInput's mouse is relative: the raw motion, while the window has the focus
         if let winit::event::DeviceEvent::MouseMotion { delta } = e {
-            if self.focused {
+            if self.focused && !scripted_run() {
                 super::dinput::motion(delta.0.round() as i32, delta.1.round() as i32);
             }
         }
