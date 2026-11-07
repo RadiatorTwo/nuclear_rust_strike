@@ -176,15 +176,22 @@ pub fn pump(wait: Duration) {
 /// `close` (the window's close button), `blur` / `focus` (the window loses or gets the focus),
 /// `poke@511fc0=1` (a dword written to guest memory, hex address and value), `text@Name` (typed
 /// characters, `_` a space), `char@0d` (one, hex). `NSTRIKE_INPUT=@file.txt` reads the items from
-/// a file; `#` starts a comment to the end of the line.
+/// a file; `#` starts a comment to the end of the line. A move also moves DirectInput's mouse
+/// by the way from the move before (from the frame's centre for the first).
 fn scripted(input: &mut VecDeque<Input>) {
     static SCRIPT: Mutex<Option<VecDeque<(u64, Input)>>> = Mutex::new(None);
+    static LAST: Mutex<Option<(i32, i32)>> = Mutex::new(None);
     let mut s = SCRIPT.lock().unwrap();
     let script = s.get_or_insert_with(|| parse_script(script_text()));
     let now = super::kernel32::start_time().elapsed().as_millis() as u64;
     while script.front().is_some_and(|e| e.0 <= now) {
         match script.pop_front().unwrap().1 {
             Input::Poke(a, v) => super::mem().wr32(a, v),
+            Input::Move(x, y) => {
+                let (lx, ly) = LAST.lock().unwrap().replace((x, y)).unwrap_or((320, 240));
+                super::dinput::motion(x - lx, y - ly);
+                input.push_back(Input::Move(x, y));
+            }
             i => input.push_back(i),
         }
     }

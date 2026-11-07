@@ -362,9 +362,14 @@ pub fn guest_call(c: &mut Cpu, addr: u32, args: &[u32]) -> u32 {
     c.r[EAX]
 }
 
-fn trace_api() -> bool {
-    static T: OnceLock<bool> = OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("NSTRIKE_TRACE_API").is_some())
+/// NSTRIKE_TRACE_API=1 logs every import called; any other value only those whose name
+/// contains it (`NSTRIKE_TRACE_API=glide2x`).
+fn trace_api(name: &str) -> bool {
+    static T: OnceLock<Option<String>> = OnceLock::new();
+    match T.get_or_init(|| std::env::var("NSTRIKE_TRACE_API").ok()) {
+        None => false,
+        Some(f) => f == "1" || name.contains(f.as_str()),
+    }
 }
 
 /// `NSTRIKE_PROF=1`: time spent in imports (and waiting for the turn after them), per import,
@@ -406,7 +411,7 @@ fn on_event(c: &mut Cpu, e: Event) {
             let (f, nargs) = {
                 let t = lock(&THUNKS);
                 let Some(th) = t.get(k) else { fatal(c, &format!("call to unused thunk {a:#x}")) };
-                if trace_api() {
+                if trace_api(&th.name) {
                     log!("api {} from {:#x}", th.name, mem().rd32(c.r[ESP]));
                 }
                 match th.f {

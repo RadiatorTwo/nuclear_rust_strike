@@ -94,13 +94,18 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   4:3 at the window's height. The game draws Glide on its game thread, not the window's:
   `window::with_gl` gives such a thread a context sharing the window's (`gl::Gl::share`,
   made by the window thread at its next pump; the window's surface is shared by pointer);
-  `show_texture` from there finishes and hands the texture over (`SHOW`).
+  `show_texture` from there finishes and hands the texture over (`SHOW`). The game's Glide
+  layer is `gl_*` (0x478cc8...): `gl_ScaledTransferToLFB_` draws 16-bit pictures (movies,
+  menu backgrounds) as 128x128 tiles, `gl_CopyBitmap_` saves what is under the cursor with
+  grLfbReadRegion, `gl_SetTMUPaletteRange_` the palette. `NSTRIKE_GLIDE_LOG=1` logs downloads.
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.
-- Environment variables are `NSTRIKE_*` (Future Cop's `FCOP_*`): `NSTRIKE_TRACE_API`,
+- Environment variables are `NSTRIKE_*` (Future Cop's `FCOP_*`): `NSTRIKE_TRACE_API` (`1`
+  every import, else those whose name contains the value: `NSTRIKE_TRACE_API=glide2x`),
   `NSTRIKE_PROF`, `NSTRIKE_WATCH`, `NSTRIKE_COUNT`, `NSTRIKE_TRACE_REG`, `NSTRIKE_SHOT`
-  (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT`, `NSTRIKE_WINDOW`.
+  (`{t}` in the name: a picture every 0.5 s), `NSTRIKE_INPUT` (`move@x,y` also moves
+  DirectInput's mouse), `NSTRIKE_WINDOW`.
 
 ## Commands
 

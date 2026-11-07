@@ -42,10 +42,14 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       sharing the window's (`window::with_gl`), finished pictures go to the window's thread
       as a texture (`show_texture`)
 - [x] The main menu is drawn through Glide (wrong textures, see below)
-- [ ] Texture formats: magenta and misplaced pictures (8-bit palettised P_8 with
-      grTexDownloadTable? other formats than FCop's 1555)
-- [ ] The cursor leaves trails, black bands: grLfbLock/grLfbWriteRegion/grLfbReadRegion
-      (the menu's 2D parts?), grBufferNumPending
+- [x] Texture coordinates of textures smaller than 256 (s, t span 0..256 over the longer
+      side): the movies' 128x128 tiles were misplaced
+- [x] P_8 / AP_88 with the palette (grTexDownloadTable/Partial), the alpha test
+- [x] Front, back and aux buffers that really swap; grLfbReadRegion/WriteRegion (the cursor
+      saves what is under it per buffer: no trails). A region read and written back unchanged
+      is copied on the GPU at full resolution
+- [ ] What the cursor restores is read at 640x480 in RGB565: slightly blurred at high
+      resolution. Movies look purple (EA logo fine): their colours, or a format question?
 - [ ] Miles streaming (AIL_sample_buffer_ready/load_sample_buffer, through pointers)
 - [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
 

@@ -491,7 +491,7 @@ fn virtual_alloc(c: &mut Cpu) -> u32 {
     // Windows' allocation granularity: the game's memory manager (SSMemAllocAlign 0x441770)
     // corrupts its free list when a heap does not start 64 KB aligned
     let r = alloc_aligned(n, 0x10000);
-    if super::trace_api() {
+    if super::trace_api("VirtualAlloc") {
         log!("VirtualAlloc({n:#x}, type {:#x}, protect {:#x}) -> {r:#x}", arg(c, 2), arg(c, 3));
     }
     r
@@ -868,7 +868,7 @@ fn create_file(c: &mut Cpu) -> u32 {
     };
     match o.open(&path) {
         Ok(f) => {
-            if super::trace_api() {
+            if super::trace_api("CreateFileA") {
                 log!("CreateFileA {name} (access {access:#x}, disposition {disp})");
             }
             if name.to_ascii_lowercase().contains("missions\\") {
@@ -877,7 +877,7 @@ fn create_file(c: &mut Cpu) -> u32 {
             objects().add(Obj::File(Arc::new(Mutex::new(f))))
         }
         Err(e) => {
-            if super::trace_api() {
+            if super::trace_api("CreateFileA") {
                 log!("CreateFileA {name}: {e}");
             }
             set_last_error(if e.kind() == std::io::ErrorKind::AlreadyExists { 80 } else { ERROR_FILE_NOT_FOUND });
@@ -935,7 +935,7 @@ fn write_file(c: &mut Cpu) -> u32 {
 fn set_file_pointer(c: &mut Cpu) -> u32 {
     let (h, lo, hi_p, how) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3));
     let Some(f) = file_of(h) else {
-        if super::trace_api() {
+        if super::trace_api("SetFilePointer") {
             log!("SetFilePointer({h:#x}): no file");
         }
         set_last_error(ERROR_INVALID_HANDLE);
@@ -1244,7 +1244,7 @@ fn copy_file(c: &mut Cpu) -> u32 {
         return 0;
     }
     let ok = std::fs::copy(&from, &to).is_ok();
-    if super::trace_api() {
+    if super::trace_api("CopyFileA") {
         log!("CopyFileA {} -> {}: {ok}", from.display(), to.display());
     }
     ok as u32
@@ -1271,7 +1271,7 @@ fn get_file_attributes(c: &mut Cpu) -> u32 {
 
 fn set_current_directory(c: &mut Cpu) -> u32 {
     let dir = cstr(arg(c, 0));
-    if super::trace_api() {
+    if super::trace_api("SetCurrentDirectoryA") {
         log!("SetCurrentDirectoryA({dir})");
     }
     super::set_current_dir(&dir);
