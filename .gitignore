@@ -1,0 +1,9 @@
+# the player's own copy of the game: never committed
+/game_files/
+# build output
+/target/
+# CD images of the game: never committed
+/*.iso
+/*.bin
+/*.img
+/*.cue

@@ -1,0 +1,2 @@
+# Names for addresses the EXE's own debug information (CodeView publics, src/cv.rs) has none
+# for: "0x<address> <name> [description]"; "?" marks a guess.
