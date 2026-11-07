@@ -111,7 +111,7 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
     let h_cpuid = decl("rt_cpuid", &sig(host_cc, &[ptr], None));
     let h_rdtsc = decl("rt_rdtsc", &sig(host_cc, &[ptr], None));
     let h_x87 = decl("rt_x87", &sig(host_cc, &[ptr, I32, I32], None));
-    let h_yield = decl("rt_yield", &sig(host_cc, &[ptr], None));
+    let h_yield = decl("rt_yield", &sig(host_cc, &[ptr, I32], None));
     let h_fpu_round = decl("rt_fpu_round", &sig(host_cc, &[I32, F64, F64, I32], Some(F64)));
     let h_hook = decl("rt_hook", &sig(host_cc, &[ptr, I32], None));
     let d_poll = module.declare_data("rt_poll", Linkage::Import, true, false).unwrap();
@@ -139,7 +139,7 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
     let t0 = Instant::now();
     let id_of = |addr: u32| originals.get(&addr).copied().unwrap_or(ids[&addr]);
 
-    // the cache is only for code that does not count its calls (FCOP_COUNT: their counters'
+    // the cache is only for code that does not count its calls (NSTRIKE_COUNT: their counters'
     // addresses are constants in it)
     let cache = cache.filter(|_| rt::count_file().is_none());
     let mut blobs = cache.and_then(|(path, key)| load(path, &key));

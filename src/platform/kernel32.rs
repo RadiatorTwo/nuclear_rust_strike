@@ -120,7 +120,7 @@ fn get_version(_: &mut Cpu) -> u32 {
 
 fn get_command_line(_: &mut Cpu) -> u32 {
     static P: OnceLock<u32> = OnceLock::new();
-    *P.get_or_init(|| new_cstr("NUKEPC.EXE"))
+    *P.get_or_init(|| new_cstr(EXE_PATH))
 }
 
 fn get_startup_info(c: &mut Cpu) -> u32 {
@@ -488,7 +488,13 @@ fn virtual_alloc(c: &mut Cpu) -> u32 {
         // committing pages of an earlier reservation: ours are committed already
         return p;
     }
-    alloc_aligned(n, 0x1000)
+    // Windows' allocation granularity: the game's memory manager (SSMemAllocAlign 0x441770)
+    // corrupts its free list when a heap does not start 64 KB aligned
+    let r = alloc_aligned(n, 0x10000);
+    if super::trace_api() {
+        log!("VirtualAlloc({n:#x}, type {:#x}, protect {:#x}) -> {r:#x}", arg(c, 2), arg(c, 3));
+    }
+    r
 }
 
 fn virtual_free(c: &mut Cpu) -> u32 {
@@ -929,6 +935,9 @@ fn write_file(c: &mut Cpu) -> u32 {
 fn set_file_pointer(c: &mut Cpu) -> u32 {
     let (h, lo, hi_p, how) = (arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3));
     let Some(f) = file_of(h) else {
+        if super::trace_api() {
+            log!("SetFilePointer({h:#x}): no file");
+        }
         set_last_error(ERROR_INVALID_HANDLE);
         return 0xffff_ffff;
     };
@@ -1129,3 +1138,164 @@ fn exit_process_from_terminate(c: &mut Cpu) -> u32 {
     super::advapi32::save();
     terminate(code)
 }
+
+// ---- what Nuclear Strike needs besides ----------------------------------------------------------
+
+fn get_process_affinity_mask(c: &mut Cpu) -> u32 {
+    for k in 1..3 {
+        if arg(c, k) != 0 {
+            mem().wr32(arg(c, k), 1);
+        }
+    }
+    1
+}
+
+fn interlocked_exchange(c: &mut Cpu) -> u32 {
+    let (p, v) = (arg(c, 0), arg(c, 1));
+    let _g = objects();
+    let old = mem().rd32(p);
+    mem().wr32(p, v);
+    old
+}
+
+fn get_current_process_id(_: &mut Cpu) -> u32 {
+    0x1000
+}
+
+fn release_mutex(c: &mut Cpu) -> u32 {
+    let me = thread_id();
+    let mut g = objects();
+    let Some(Obj::Mutex { owner, count }) = g.map.get_mut(&arg(c, 0)) else { return 0 };
+    if *owner != me {
+        return 0;
+    }
+    *count -= 1;
+    if *count == 0 {
+        *owner = 0;
+    }
+    drop(g);
+    SIGNAL.notify_all();
+    1
+}
+
+/// SuspendThread: not possible with threads that take turns at their own pace; logged.
+fn suspend_thread(c: &mut Cpu) -> u32 {
+    log!("warn: SuspendThread({:#x}) ignored", arg(c, 0));
+    0
+}
+
+/// GetLocalTime: SYSTEMTIME of the time now (UTC).
+fn get_local_time(c: &mut Cpu) -> u32 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let (secs, ms) = (t.as_secs(), t.subsec_millis());
+    let days = (secs / 86400) as i64;
+    // civil date from days since 1970-01-01 (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + (month <= 2) as i64;
+    let weekday = (days + 4).rem_euclid(7);
+    let s = secs % 86400;
+    let p = arg(c, 0);
+    for (k, v) in [year, month, weekday, day, (s / 3600) as i64, (s / 60 % 60) as i64, (s % 60) as i64, ms as i64].into_iter().enumerate() {
+        mem().wr16(p + 2 * k as u32, v as u16);
+    }
+    0
+}
+
+/// GetTimeZoneInformation: UTC, no daylight saving.
+fn get_time_zone_information(c: &mut Cpu) -> u32 {
+    mem().slice(arg(c, 0), 172).fill(0);
+    0
+}
+
+fn lstrcmpi(c: &mut Cpu) -> u32 {
+    let (a, b) = (cstr(arg(c, 0)).to_ascii_lowercase(), cstr(arg(c, 1)).to_ascii_lowercase());
+    a.cmp(&b) as i32 as u32
+}
+
+fn get_file_size(c: &mut Cpu) -> u32 {
+    let Some(f) = file_of(arg(c, 0)) else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return INVALID_HANDLE;
+    };
+    let len = f.lock().unwrap().metadata().map_or(0, |m| m.len());
+    if arg(c, 1) != 0 {
+        mem().wr32(arg(c, 1), (len >> 32) as u32);
+    }
+    len as u32
+}
+
+fn copy_file(c: &mut Cpu) -> u32 {
+    let (from, to) = (host_path(&cstr(arg(c, 0))), host_path(&cstr(arg(c, 1))));
+    if arg(c, 2) != 0 && to.exists() {
+        set_last_error(80);
+        return 0;
+    }
+    let ok = std::fs::copy(&from, &to).is_ok();
+    if super::trace_api() {
+        log!("CopyFileA {} -> {}: {ok}", from.display(), to.display());
+    }
+    ok as u32
+}
+
+fn delete_file(c: &mut Cpu) -> u32 {
+    std::fs::remove_file(host_path(&cstr(arg(c, 0)))).is_ok() as u32
+}
+
+fn create_directory(c: &mut Cpu) -> u32 {
+    std::fs::create_dir(host_path(&cstr(arg(c, 0)))).is_ok() as u32
+}
+
+fn get_file_attributes(c: &mut Cpu) -> u32 {
+    match std::fs::metadata(host_path(&cstr(arg(c, 0)))) {
+        Ok(m) if m.is_dir() => 0x10,
+        Ok(_) => 0x20,
+        Err(_) => {
+            set_last_error(ERROR_FILE_NOT_FOUND);
+            INVALID_HANDLE
+        }
+    }
+}
+
+fn set_current_directory(c: &mut Cpu) -> u32 {
+    let dir = cstr(arg(c, 0));
+    if super::trace_api() {
+        log!("SetCurrentDirectoryA({dir})");
+    }
+    super::set_current_dir(&dir);
+    1
+}
+
+/// DeviceIoControl: the only device the game opens is MEMVXD.VXD (a Windows 95 driver); logged.
+fn device_io_control(c: &mut Cpu) -> u32 {
+    log!("warn: DeviceIoControl({:#x}, code {:#x}, in {} bytes, out {} bytes) fails", arg(c, 0), arg(c, 1), arg(c, 3), arg(c, 5));
+    0
+}
+
+pub const IMPORTS_MORE: &[Import] = &[
+    ("SetPriorityClass", 2, ret1),
+    ("GetProcessAffinityMask", 3, get_process_affinity_mask),
+    ("InterlockedExchange", 2, interlocked_exchange),
+    ("GetCurrentProcessId", 0, get_current_process_id),
+    ("ReleaseMutex", 1, release_mutex),
+    ("SuspendThread", 1, suspend_thread),
+    ("TlsFree", 1, ret1),
+    ("SetConsoleCtrlHandler", 2, ret1),
+    ("GetLocalTime", 1, get_local_time),
+    ("GetTimeZoneInformation", 1, get_time_zone_information),
+    ("lstrcmpiA", 2, lstrcmpi),
+    ("GetFileSize", 2, get_file_size),
+    ("CopyFileA", 3, copy_file),
+    ("DeleteFileA", 1, delete_file),
+    ("CreateDirectoryA", 2, create_directory),
+    ("GetFileAttributesA", 1, get_file_attributes),
+    ("SetFileAttributesA", 2, ret1),
+    ("SetCurrentDirectoryA", 1, set_current_directory),
+    ("DeviceIoControl", 8, device_io_control),
+];

@@ -99,17 +99,17 @@ impl Func {
                         }
                     }
                     FlowControl::IndirectBranch | FlowControl::UnconditionalBranch => {
-                        if i.op0_kind() == OpKind::Memory
-                            && i.memory_index() != Register::None
-                            && i.memory_index_scale() == 4
-                            && i.memory_base() == Register::None
-                        {
+                        // jmp [index*4 + table], or Watcom's jmp cs:[reg + table] (reg = index*4)
+                        let scaled = i.memory_index() != Register::None && i.memory_index_scale() == 4 && i.memory_base() == Register::None;
+                        let based = i.memory_index() == Register::None && i.memory_base() != Register::None && is_code(i.memory_displacement32());
+                        if i.op0_kind() == OpKind::Memory && (scaled || based) {
                             // "neg ecx; jmp [ecx*4 + T]" (memcpy's tail copy) only reads entries before T
                             let neg = self.ins.contains(&(pc.wrapping_sub(2)))
                                 && code.at(pc - 2).is_some_and(|p| {
                                     p.mnemonic() == Mnemonic::Neg
                                         && p.op0_kind() == OpKind::Register
                                         && p.op0_register() == i.memory_index()
+                                        && scaled
                                 });
                             let tbl = self.table(code, i.memory_displacement32(), if neg { 8 } else { 4 });
                             for &t in &tbl {
@@ -170,6 +170,19 @@ impl Func {
     }
 }
 
+/// The 32-bit immediates of a function's instructions that lie in the code.
+fn immediates(code: &mut Code, f: &Func) -> Vec<u32> {
+    f
+        .ins
+        .iter()
+        .filter_map(|&a| {
+            let i = code.at(a)?;
+            (0..i.op_count()).find(|&k| i.op_kind(k) == OpKind::Immediate32).map(|_| i.immediate32())
+        })
+        .filter(|&t| is_code(t))
+        .collect()
+}
+
 pub struct Program {
     /// entry -> function
     pub fns: BTreeMap<u32, Func>,
@@ -209,6 +222,18 @@ impl Program {
                 }
             }
         }
+        // code addresses as immediates (`push offset thread_proc`, `mov eax, offset callback`):
+        // the game's own functions without a public name
+        for f in fns.values() {
+            for t in immediates(code, f) {
+                // only code nothing decoded yet (constants that happen to point into a function
+                // are no entry points)
+                let plausible = !insn_at.contains(&t) && !inside.contains(&t) && !matches!(code.img.byte(t), 0x00 | 0x90 | 0xCC);
+                if plausible && !fns.contains_key(&t) {
+                    data_ptrs.insert(t);
+                }
+            }
+        }
         // add entries until nothing new turns up
         let los: Vec<u32> = ranges.iter().map(|r| r.0).collect();
         let mut todo: Vec<Vec<u32>> =
@@ -235,7 +260,13 @@ impl Program {
                     let next = los.get(k).copied().unwrap_or(TEXT_END);
                     Func::new(code, t, t, next, format!("FUN_{t:08x}"))
                 };
-                next.push(e.targets.iter().chain(&e.calls).copied().filter(|&x| !(e.inside(x) && e.ins.contains(&x))).collect());
+                let mut more: Vec<u32> = e.targets.iter().chain(&e.calls).copied().filter(|&x| !(e.inside(x) && e.ins.contains(&x))).collect();
+                for x in immediates(code, &e) {
+                    if code.at(x).is_some() {
+                        more.push(x);
+                    }
+                }
+                next.push(more);
                 fns.insert(t, e);
             }
             todo = next;

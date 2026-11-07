@@ -7,7 +7,16 @@
 //! puts its result in eax and removes the return address and (stdcall) arguments.
 
 pub mod advapi32;
+pub mod ddraw;
+pub mod dinput;
+pub mod dsound;
+pub mod gdi32;
+pub mod gl;
 pub mod kernel32;
+pub mod miles;
+pub mod misc;
+pub mod user32;
+pub mod window;
 
 pub use crate::image::ResId;
 use crate::image::Image;
@@ -552,37 +561,83 @@ fn host_path_in(root: &Path, parts: &[&str]) -> PathBuf {
     p
 }
 
-/// A guest path ("C:\NUKEPC\data\XA.RES", "data\XA.RES") as a host path inside the game
-/// folder; else inside its parent.
-pub fn host_path(guest: &str) -> PathBuf {
-    let g = if guest.len() >= 2 && guest.as_bytes()[1] == b':' { &guest[2..] } else { guest };
-    let parts: Vec<&str> = g.split(['\\', '/']).filter(|s| !s.is_empty() && *s != ".").collect();
-    let p = host_path_in(game_dir(), &parts);
-    if p.exists() {
-        return p;
-    }
-    match game_dir().parent() {
-        Some(up) => {
-            let q = host_path_in(up, &parts);
-            if q.exists() { q } else { p }
+/// The game's current directory, as parts below the game folder (SetCurrentDirectoryA).
+static CWD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A guest path as parts below the game folder. The game sees itself in C:\NUKEPC and the CD
+/// in D: (its `worlds` are the installed `data\Worlds`, its `video` ours); relative paths are
+/// below the current directory.
+fn guest_parts(guest: &str) -> Vec<String> {
+    let b = guest.as_bytes();
+    let drive = (b.len() >= 2 && b[1] == b':').then(|| b[0].to_ascii_uppercase());
+    let rest = if drive.is_some() { &guest[2..] } else { guest };
+    let absolute = rest.starts_with(['\\', '/']);
+    let mut parts: Vec<String> = match (drive, absolute) {
+        (_, false) => lock(&CWD).clone(),
+        _ => Vec::new(),
+    };
+    for p in rest.split(['\\', '/']).filter(|s| !s.is_empty() && *s != ".") {
+        if p == ".." {
+            parts.pop();
+        } else {
+            parts.push(p.to_string());
         }
-        None => p,
     }
+    if absolute {
+        if drive.is_none_or(|d| d == b'C') && parts.first().is_some_and(|p| p.eq_ignore_ascii_case("NUKEPC")) {
+            parts.remove(0);
+        } else if drive == Some(b'D') && parts.first().is_some_and(|p| p.eq_ignore_ascii_case("worlds")) {
+            parts.splice(0..1, ["data".to_string(), "Worlds".to_string()]);
+        }
+    }
+    parts
+}
+
+/// SetCurrentDirectoryA.
+pub fn set_current_dir(guest: &str) {
+    let parts = guest_parts(guest);
+    *lock(&CWD) = parts;
+}
+
+/// A guest path ("C:\NUKEPC\data\XA.RES", "XA.RES" in the current directory) as a host path
+/// inside the game folder.
+pub fn host_path(guest: &str) -> PathBuf {
+    let parts = guest_parts(guest);
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    host_path_in(game_dir(), &parts)
 }
 
 // ---- process start -------------------------------------------------------------------------------
 
 fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
     let tables: &[&[Import]] = match dll.to_ascii_uppercase().as_str() {
-        "KERNEL32.DLL" => &[kernel32::IMPORTS],
+        "KERNEL32.DLL" => &[kernel32::IMPORTS, kernel32::IMPORTS_MORE],
         "ADVAPI32.DLL" => &[advapi32::IMPORTS],
-        _ => &[],
+        "USER32.DLL" => &[user32::IMPORTS],
+        "GDI32.DLL" => &[gdi32::IMPORTS],
+        "DDRAW.DLL" => &[ddraw::IMPORTS],
+        "DSOUND.DLL" => &[dsound::IMPORTS],
+        "DINPUT.DLL" => &[dinput::IMPORTS],
+        "MSS32.DLL" => &[miles::IMPORTS],
+        "WINMM.DLL" => &[dsound::IMPORTS, misc::IMPORTS],
+        _ => &[misc::IMPORTS],
     };
     tables.iter().flat_map(|t| t.iter()).find(|i| i.0 == name)
 }
 
 /// Game functions replaced by our own (`jit::compile`).
-pub const HOOKS: &[(u32, crate::rt::Hook)] = &[];
+pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear)];
+
+/// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector
+/// for VGA memory (0xa0000) by reading the GDT and LDT (sgdt/sldt). There is no VGA memory
+/// here: no selector (0).
+const SELECTOR_FROM_LINEAR: u32 = 0x4bf6c0;
+
+fn selector_from_linear(c: &mut Cpu) {
+    log!("SelectorFromLinearAddress({:#x}): none", c.r[EAX]);
+    c.r[EAX] = 0;
+    c.r[ESP] += 4;
+}
 
 /// Load the EXE into a new guest address space, bind its imports, and run it on this thread
 /// (which needs a large stack: guest calls nest on it). Returns the exit code.
@@ -623,11 +678,21 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     rt::set_handler(on_event);
     rt::set_yield(turn_yield);
     catch_faults();
-    if std::env::var_os("NSTRIKE_WATCH").is_some() {
-        // where the game is, every 2 s (for hangs)
-        std::thread::spawn(|| loop {
+    if let Ok(w) = std::env::var("NSTRIKE_WATCH") {
+        // where the game is, every 2 s (for hangs); "NSTRIKE_WATCH=568b14,4eee50": also the
+        // dwords at these addresses
+        let addrs: Vec<u32> = w.split(',').filter_map(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).ok()).collect();
+        std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
+            for &a in &addrs {
+                log!("watch: [{a:#x}] = {:#010x}", mem().rd32(a));
+            }
             let t = *lock(&TURN.tickets);
+            // a thread spinning in guest code yields at its loop heads when another one waits
+            rt::POLL.store(1, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let y = rt::LAST_YIELD.load(Ordering::Relaxed);
+            log!("watch: last loop head {}", crate::image::named(y));
             log!("watch: last import call returned to {:#x}, turn {}/{}, poll {}", LAST_CALL.load(Ordering::Relaxed), t.1, t.0, rt::POLL.load(Ordering::Relaxed));
         });
     }

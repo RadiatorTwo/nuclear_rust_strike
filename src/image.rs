@@ -53,6 +53,11 @@ impl Image {
                 }
             })
             .collect();
+        // uninitialised data (.bss): Watcom gives its size as raw data at file offset 0
+        for s in sections.iter_mut().filter(|s| s.raw == 0) {
+            s.vsize = s.vsize.max(s.rsize);
+            s.rsize = 0;
+        }
         // Watcom's linker leaves every virtual size 0: a section reaches up to the next one
         let mut ends: Vec<u32> = sections.iter().map(|s| s.va).collect();
         ends.push(image_end);

@@ -86,7 +86,7 @@ pub fn unsupported(i: &Instruction) -> Option<String> {
     }
     let ok = match m {
         Mov | Movzx | Movsx | Lea | Add | Adc | Sub | Sbb | Cmp | And | Or | Xor | Test | Inc | Dec | Neg | Not | Shl
-        | Sal | Shr | Sar | Rol | Ror | Rcl | Rcr | Push | Pop | Pushad | Popad | Pushfd | Popfd | Lahf | Sahf | Clc | Stc | Cmc
+        | Sal | Shr | Sar | Rol | Ror | Rcl | Rcr | Push | Pop | Pushad | Popad | Pushfd | Popfd | Pushf | Popf | Lahf | Sahf | Clc | Stc | Cmc
         | Cld | Std | Xchg | Bt | Bts | Btr | Btc | Cdq | Cwde | Cbw | Cwd | Xlatb | Div | Idiv | Leave | Nop | Wait
         | Pause | Cli | Sti | Cpuid | Rdtsc | Movsb | Movsw | Movsd | Stosb | Stosw | Stosd | Lodsb | Lodsw | Lodsd
         | Scasb | Scasw | Scasd | Cmpsb | Cmpsw | Cmpsd | Jmp | Call | Ret | Loop | Loope | Loopne | Jecxz | Jcxz
@@ -95,6 +95,7 @@ pub fn unsupported(i: &Instruction) -> Option<String> {
         Insb | Insw | Insd => !(i.has_rep_prefix() || i.has_repe_prefix() || i.has_repne_prefix()),
         Movd | Movq => (0..i.op_count()).all(|k| i.op_kind(k) != OpKind::Register || !i.op_register(k).is_xmm()),
         Bswap => i.op0_register().is_gpr32(),
+        Bsf | Bsr => op_size(i, 0) == 4,
         Shld | Shrd => i.op0_register().is_gpr32() || (i.op0_kind() == OpKind::Memory && i.memory_size().size() == 4),
         Mul => i.op_count() == 1 && op_size(i, 0) != 2,
         Imul => !(i.op_count() == 1 && op_size(i, 0) == 2),
@@ -605,7 +606,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
             let blk = self.blocks[&a];
             self.b.switch_to_block(blk);
             if heads.contains(&a) {
-                self.poll();
+                self.poll(a);
             }
             // an instruction the game rewrites: the version its current bytes encode
             for (bytes, v) in self.smc.variants.get(&a).into_iter().flatten() {
@@ -644,14 +645,14 @@ impl<'a, 'f> Lifter<'a, 'f> {
     }
 
     /// At a loop head: let another guest thread run if one is waiting for its turn.
-    fn poll(&mut self) {
+    fn poll(&mut self, at_pc: u32) {
         let ptr = self.cfg.pointer_type();
         let at = self.b.ins().symbol_value(ptr, self.refs.poll);
         let v = self.b.ins().load(I32, mf(), at, 0);
         let (slow, on) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(v, slow, &[], on, &[]);
         self.b.switch_to_block(slow);
-        self.helper(self.refs.yield_, None);
+        self.helper(self.refs.yield_, Some(at_pc as i64));
         self.b.ins().jump(on, &[]);
         self.b.switch_to_block(on);
     }
@@ -854,7 +855,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
                     self.set_reg(k, v);
                 }
             }
-            Pushfd => {
+            Pushfd | Pushf => {
                 let df = self.b.ins().load(I8, mf(), self.cpu, offset_of!(Cpu, df) as i32);
                 let mut v = self.iconst(I32, 0x202);
                 for (var, bit) in [(self.cf, 0), (self.pf, 2), (self.zf, 6), (self.sf, 7), (self.of, 11)] {
@@ -866,10 +867,27 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 let d = self.b.ins().uextend(I32, df);
                 let d = self.b.ins().ishl_imm_u(d, 10);
                 v = self.b.ins().bor(v, d);
-                self.push32(v);
+                if m == Pushf {
+                    // 16 bits (Watcom's CPU check: whether div changed the flags)
+                    let v = self.b.ins().ireduce(I16, v);
+                    let sp = self.reg(4);
+                    let sp = self.b.ins().iadd_imm_s(sp, -2);
+                    self.set_reg(4, sp);
+                    self.store(sp, v);
+                } else {
+                    self.push32(v);
+                }
             }
-            Popfd => {
-                let v = self.pop32();
+            Popfd | Popf => {
+                let v = if m == Popf {
+                    let sp = self.reg(4);
+                    let v = self.load(sp, 2);
+                    let sp = self.b.ins().iadd_imm_s(sp, 2);
+                    self.set_reg(4, sp);
+                    self.b.ins().uextend(I32, v)
+                } else {
+                    self.pop32()
+                };
                 for (var, bit) in [(self.cf, 0), (self.pf, 2), (self.zf, 6), (self.sf, 7), (self.of, 11)] {
                     let f = self.bit8(v, bit);
                     self.set_flag(var, f);
@@ -920,6 +938,22 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 let x = self.rd(i, 0, 4);
                 let v = self.b.ins().bswap(x);
                 self.wr(i, 0, v);
+            }
+            Bsf | Bsr => {
+                // the lowest/highest set bit's index; a zero source leaves the destination
+                let x = self.rd(i, 1, 4);
+                let old = self.rd(i, 0, 4);
+                let n = if m == Bsf {
+                    self.b.ins().ctz(x)
+                } else {
+                    let z = self.b.ins().clz(x);
+                    let k = self.iconst(I32, 31);
+                    self.b.ins().isub(k, z)
+                };
+                let zero = self.b.ins().icmp_imm_u(IntCC::Equal, x, 0);
+                let v = self.b.ins().select(zero, old, n);
+                self.wr(i, 0, v);
+                self.set_flag(self.zf, zero);
             }
             Bt | Bts | Btr | Btc => self.bit_test(i, m),
             Cdq => {

@@ -186,15 +186,15 @@ pub extern "C" fn rt_lookup(cpu: *mut Cpu, addr: u32) -> *const u8 {
 /// at loop heads and calls `rt_yield`, so a thread spinning on a flag lets the others run.
 pub static POLL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// `FCOP_COUNT=<file>`: every function entry counts its calls here (index: address - the
+/// `NSTRIKE_COUNT=<file>`: every function entry counts its calls here (index: address - the
 /// code's start); the platform layer writes them to the file every second.
 pub static COUNTS: [std::sync::atomic::AtomicU32; (crate::discover::TEXT_END - crate::discover::TEXT_START) as usize] =
     [const { std::sync::atomic::AtomicU32::new(0) }; (crate::discover::TEXT_END - crate::discover::TEXT_START) as usize];
 
-/// Where `FCOP_COUNT` writes the counts (None: functions do not count).
+/// Where `NSTRIKE_COUNT` writes the counts (None: functions do not count).
 pub fn count_file() -> Option<&'static str> {
     static F: OnceLock<Option<String>> = OnceLock::new();
-    F.get_or_init(|| std::env::var("FCOP_COUNT").ok().filter(|v| !v.is_empty())).as_deref()
+    F.get_or_init(|| std::env::var("NSTRIKE_COUNT").ok().filter(|v| !v.is_empty())).as_deref()
 }
 
 static YIELD: OnceLock<fn()> = OnceLock::new();
@@ -204,7 +204,11 @@ pub fn set_yield(f: fn()) {
     let _ = YIELD.set(f);
 }
 
-pub extern "C" fn rt_yield(_cpu: *mut Cpu) {
+/// The loop head a guest thread last yielded at (for hang reports).
+pub static LAST_YIELD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub extern "C" fn rt_yield(_cpu: *mut Cpu, at: u32) {
+    LAST_YIELD.store(at, std::sync::atomic::Ordering::Relaxed);
     if let Some(f) = YIELD.get() {
         f()
     }
