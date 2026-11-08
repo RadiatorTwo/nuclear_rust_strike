@@ -12,7 +12,7 @@ use crate::smc::{Field, Smc};
 use cranelift_codegen::ir::{self, Block, FuncRef, GlobalValue, InstBuilder, MemFlagsData, SigRef, Type, Value, condcodes::IntCC, types::*};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, Switch, Variable};
-use iced_x86::{ConditionCode, FlowControl, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{ConditionCode, FlowControl, Instruction, MemorySize, Mnemonic, OpKind, Register};
 use std::collections::HashMap;
 use std::mem::offset_of;
 
@@ -32,6 +32,8 @@ pub struct Refs {
     pub rdtsc: FuncRef,
     pub x87: FuncRef,
     pub fpu_round: FuncRef,
+    pub mxcsr_rz: FuncRef,
+    pub mxcsr_set: FuncRef,
     pub yield_: FuncRef,
     /// the address of `rt::POLL`, a symbol (not a constant: the code is cached, and the
     /// program's statics move from run to run)
@@ -45,6 +47,21 @@ const TRAP_INT: i64 = 1;
 fn gpr_ok(r: Register) -> bool {
     r == Register::None || r.is_gpr32()
 }
+
+/// An instruction the x87 cache stays over: plain integer ones and x87 ones.
+fn plain(i: &Instruction) -> bool {
+    use Mnemonic::*;
+    matches!(
+        i.mnemonic(),
+        Mov | Movzx | Movsx | Lea | Add | Sub | Adc | Sbb | And | Or | Xor | Not | Neg | Inc | Dec | Cmp | Test | Shl | Shr
+            | Sar | Rol | Ror | Push | Pop | Xchg | Nop | Cdq | Cwde | Cbw | Cwd
+    ) || is_setcc(i)
+        || is_cmovcc(i)
+        || x87::is_x87(i.mnemonic())
+}
+
+/// x87 arithmetic in a straight run that makes it worth a version of its own (`versions`).
+const VERSION_OPS: usize = 4;
 
 /// Why an instruction cannot be lifted yet, if it cannot. Checked before any code is
 /// emitted, so an unsupported instruction becomes a clean call to `rt_unimpl`.
@@ -183,6 +200,9 @@ pub struct Lifter<'a, 'f> {
     xc: x87::Cache,
     /// instructions reached otherwise than from the one before (the cache is empty there)
     joins: std::collections::HashSet<u32>,
+    /// while lifting a straight run's version for the control word 0xc7f (see `versions`):
+    /// the SSE control register as it was before, put back when the run ends
+    rz: Option<Value>,
 }
 
 fn mf() -> MemFlagsData {
@@ -231,6 +251,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
             missing: Vec::new(),
             xc: x87::Cache::default(),
             joins: std::collections::HashSet::new(),
+            rz: None,
         };
         l.load_state();
         l
@@ -615,6 +636,12 @@ impl<'a, 'f> Lifter<'a, 'f> {
         self.joins = addrs.iter().filter_map(|&a| direct_target(&code.at(a).unwrap()).filter(|&t| self.f.inside(t))).collect();
         self.joins.insert(self.f.entry);
         self.joins.extend(self.smc.variants.keys().copied());
+        let runs = if self.xc.enabled { self.rz_runs(code, &addrs) } else { HashMap::new() };
+        for run in runs.values() {
+            // the run's versions both end with the cache written back
+            let last = code.at(*run.last().unwrap()).unwrap();
+            self.joins.insert(last.next_ip32());
+        }
         // loop heads: targets of backward branches inside the function
         let heads: std::collections::HashSet<u32> = addrs
             .iter()
@@ -636,7 +663,10 @@ impl<'a, 'f> Lifter<'a, 'f> {
                 self.emit(v);
                 self.b.switch_to_block(other);
             }
-            self.emit(&i);
+            match runs.get(&a) {
+                Some(run) => self.versions(code, run),
+                None => self.emit(&i),
+            }
         }
         let mut exits: Vec<(u32, Block)> = self.exits.iter().map(|(&t, &b)| (t, b)).collect();
         exits.sort_unstable();
@@ -661,6 +691,87 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let missing = std::mem::take(&mut self.missing);
         self.b.finalize(self.cfg);
         missing
+    }
+
+    /// Straight runs of instructions worth a version for the control word 0xc7f (the
+    /// renderer's: 24 bits, truncating), by their first address: plain instructions (x87
+    /// arithmetic, loads and stores, integer ones), none reached from elsewhere but the first,
+    /// at least `VERSION_OPS` x87 operations. Not in them: what changes the control word,
+    /// calls a helper, or converts a 64-bit integer (rounded by the SSE rounding mode).
+    fn rz_runs(&self, code: &mut crate::discover::Code, addrs: &[u32]) -> HashMap<u32, Vec<u32>> {
+        use Mnemonic::*;
+        let fits = |i: &Instruction| {
+            let m = i.mnemonic();
+            let mem = |s: MemorySize| i.op_count() > 0 && i.op0_kind() == OpKind::Memory && i.memory_size() == s;
+            let x87_ok = match m {
+                Fld | Fst | Fstp => !mem(MemorySize::Float80),
+                Fild => !mem(MemorySize::Int64),
+                Fist | Fistp | Fisttp | Fxch | Fadd | Faddp | Fiadd | Fsub | Fsubp | Fisub | Fsubr | Fsubrp | Fisubr | Fmul
+                | Fmulp | Fimul | Fdiv | Fdivp | Fidiv | Fdivr | Fdivrp | Fidivr | Fchs | Fabs | Fsqrt | Frndint | Fld1
+                | Fldz | Fcom | Fcomp | Fucom | Fucomp | Ficom | Ficomp | Fcompp | Fucompp | Ftst | Fcomi | Fcomip
+                | Fucomi | Fucomip | Fnstsw | Fnstcw | Fnclex | Fincstp | Fdecstp | Ffree | Fnop => true,
+                _ => !x87::is_x87(m),
+            };
+            plain(i) && x87_ok && i.flow_control() == FlowControl::Next && unsupported(i).is_none()
+        };
+        let arith = |i: &Instruction| {
+            matches!(
+                i.mnemonic(),
+                Fadd | Faddp | Fiadd | Fsub | Fsubp | Fisub | Fsubr | Fsubrp | Fisubr | Fmul | Fmulp | Fimul | Fdiv | Fdivp
+                    | Fidiv | Fdivr | Fdivrp | Fidivr | Fsqrt
+            )
+        };
+        let mut runs = HashMap::new();
+        let mut k = 0;
+        while k < addrs.len() {
+            let (mut j, mut ops) = (k, 0);
+            while j < addrs.len() {
+                let i = code.at(addrs[j]).unwrap();
+                let entered = j > k && (self.joins.contains(&addrs[j]) || code.at(addrs[j - 1]).unwrap().next_ip32() != addrs[j]);
+                if entered || !fits(&i) || self.smc.variants.contains_key(&addrs[j]) {
+                    break;
+                }
+                ops += arith(&i) as usize;
+                j += 1;
+            }
+            if ops >= VERSION_OPS {
+                runs.insert(addrs[k], addrs[k..j].to_vec());
+            }
+            k = j.max(k + 1);
+        }
+        runs
+    }
+
+    /// A straight run (`rz_runs`) lifted twice: under the control word 0xc7f with the SSE
+    /// rounding set to truncate (`rt_mxcsr_rz`), where x87 arithmetic is a double operation cut
+    /// to 24 bits (`arith_rz`) without the checks the general case needs; else as usual. The
+    /// cache is written back before (nothing computed before the SSE mode changes is used
+    /// after it: Cranelift would have shared it) and at the end of both.
+    fn versions(&mut self, code: &mut crate::discover::Code, run: &[u32]) {
+        self.x87_settle();
+        let cw = self.fcw();
+        let cw = self.b.ins().uextend(I32, cw);
+        let pcrc = self.b.ins().band_imm_u(cw, 0xf00);
+        let rz = self.b.ins().icmp_imm_u(IntCC::Equal, pcrc, 0xc00);
+        let (rz_blk, other) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(rz, rz_blk, &[], other, &[]);
+        self.b.switch_to_block(rz_blk);
+        let call = self.b.ins().call(self.refs.mxcsr_rz, &[]);
+        self.rz = Some(self.b.inst_results(call)[0]);
+        // its own blocks for the run's instructions but the first
+        let kept: Vec<(u32, Block)> = run[1..].iter().map(|&a| (a, self.blocks.insert(a, self.b.create_block()).unwrap())).collect();
+        for (n, &a) in run.iter().enumerate() {
+            if n > 0 {
+                let blk = self.blocks[&a];
+                self.b.switch_to_block(blk);
+            }
+            self.emit(&code.at(a).unwrap());
+        }
+        assert!(self.rz.is_none(), "a version's run ends with the cache written back");
+        self.blocks.extend(kept);
+        // the usual version: the first instruction here, the others as the loop comes to them
+        self.b.switch_to_block(other);
+        self.emit(&code.at(run[0]).unwrap());
     }
 
     /// At a loop head: let another guest thread run if one is waiting for its turn.
@@ -716,14 +827,7 @@ impl<'a, 'f> Lifter<'a, 'f> {
         let m = i.mnemonic();
         // the x87 cache stays over plain integer instructions; anything that may branch, call
         // or reach a helper writes it back first, on the one path all later code follows
-        let plain = matches!(
-            m,
-            Mov | Movzx | Movsx | Lea | Add | Sub | Adc | Sbb | And | Or | Xor | Not | Neg | Inc | Dec | Cmp | Test | Shl | Shr
-                | Sar | Rol | Ror | Push | Pop | Xchg | Nop | Cdq | Cwde | Cbw | Cwd
-        ) || is_setcc(i)
-            || is_cmovcc(i)
-            || x87::is_x87(m);
-        if !plain || i.flow_control() != FlowControl::Next {
+        if !plain(i) || i.flow_control() != FlowControl::Next {
             self.x87_settle();
         }
         match i.flow_control() {

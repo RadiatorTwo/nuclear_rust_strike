@@ -83,8 +83,11 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [x] Speed: x87 24-bit rounding's usual cases cover exact results and zeros, cut in a vector
       register, the mode made once a run: projection routines 23.6% -> 16.6% of the game
       thread, ~300 -> ~350 fps unlimited (2026-11-08)
-- [ ] Speed: guest code ~46% of the game thread: vec3fp16_Project*ListASM_ ~17% (under 0xc7f
-      still ~3x the cost of 0x27f in `tests/x87_bench.rs`), 0x475a34 ~7%, 0x475314 ~3%.
+- [x] Speed: straight runs of x87 code lifted twice, for 0xc7f with the SSE rounding set to
+      truncate (no rounding checks): projection routines 16.6% -> 7.1%, ~307 -> ~337 fps in an
+      A/B run (2026-11-08)
+- [ ] Speed: 0x475a34 ~6%, vec3fp16_Project*ListASM_ ~7% (0xc7f ~2x the cost of 0x27f in
+      `tests/x87_bench.rs`: two helper calls a run for MXCSR), 0x475314 ~2%.
       0x475a34 is the gl_* layer's set-up of each polygon (state calls, colours, clamps): its
       time spread over all of it; fusing fcom/fnstsw/sahf/jcc (~3 ns a compare) not worth it.
       Next: versions of a straight run per rounding mode (tested once at its start)

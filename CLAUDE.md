@@ -165,7 +165,16 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   for it); the mode's values are stored once a run into `Cpu::x87_mode` (nobody reads them:
   without a use in a dominating block Cranelift made them again in every operation's block).
   `tests/x87_bench.rs` (ignored; `--ignored --nocapture`) times a projection-like loop per
-  point under 0xc7f and 0x27f. `rt_lookup` (indirect calls) reads a dense table over the code;
+  point under 0xc7f and 0x27f. Straight runs with at least 4 x87 operations (`rz_runs`) are
+  lifted twice (`versions`, 2026-11-08, projection 16.6% -> 7.1%, bench 71 -> 42 ns): if
+  the control word says 24 bits truncating, `rt_mxcsr_rz` sets the SSE rounding to truncate
+  and each operation is the double one cut to 24 bits (truncating twice is truncating once),
+  tested only for a normal result (`arith_rz`), a float store is fdemote; `x87_settle` puts
+  MXCSR back at the run's end. The cache is written back before the run (no value computed
+  before the switch is shared into it); results are branch conditions (made after the
+  switch). `rt_fpu_round` runs with the default rounding itself. Not in such runs: fldcw,
+  helpers, fild qword. A float store beyond a float's range under 0xc7f gives the largest
+  float (the FPU's masked overflow), not infinity (`rt_fpu_round` gave infinity before). `rt_lookup` (indirect calls) reads a dense table over the code;
   thunk addresses miss at once. Glide imports that never wait keep the turn (`SLOW_GLIDE`
   lists those that give it up). A thread keeps the turn at loop heads for `SLICE` (0.5 ms,
   `tsc`): the game and controller threads traded it 60 000 times a second.

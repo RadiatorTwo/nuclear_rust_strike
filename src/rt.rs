@@ -634,6 +634,41 @@ pub enum FpuOp {
 /// truncating. The result is computed together with the sign of its rounding error, so
 /// rounding it again gives what the FPU gives in one step.
 pub extern "C" fn rt_fpu_round(op: u32, x: f64, y: f64, cw: u32) -> f64 {
+    // the caller may run with the SSE rounding set to truncate (`rt_mxcsr_rz`): our arithmetic
+    // here rounds to nearest
+    let old = mxcsr();
+    set_mxcsr(old & !0x6000);
+    let r = fpu_round(op, x, y, cw);
+    set_mxcsr(old);
+    r
+}
+
+/// The SSE control and status register.
+fn mxcsr() -> u32 {
+    let mut v = 0u32;
+    unsafe { std::arch::asm!("stmxcsr [{}]", in(reg) &mut v, options(nostack, preserves_flags)) };
+    v
+}
+
+fn set_mxcsr(v: u32) {
+    unsafe { std::arch::asm!("ldmxcsr [{}]", in(reg) &v, options(nostack, preserves_flags)) };
+}
+
+/// Generated code, before a straight run of x87 instructions under the control word 0xc7f
+/// (24 bits, truncating): SSE arithmetic truncates too, so a double result cut to 24 bits is
+/// what the FPU gives (truncating twice is truncating once). Returns the register as it was,
+/// for `rt_mxcsr_set` at the run's end.
+pub extern "C" fn rt_mxcsr_rz() -> u32 {
+    let old = mxcsr();
+    set_mxcsr(old | 0x6000);
+    old
+}
+
+pub extern "C" fn rt_mxcsr_set(v: u32) {
+    set_mxcsr(v);
+}
+
+fn fpu_round(op: u32, x: f64, y: f64, cw: u32) -> f64 {
     let sign = |e: f64| if e > 0.0 { 1 } else if e < 0.0 { -1 } else { 0 };
     let (s, err) = match op {
         o if o == FpuOp::Add as u32 || o == FpuOp::Sub as u32 => {
@@ -673,7 +708,24 @@ pub extern "C" fn rt_fpu_round(op: u32, x: f64, y: f64, cw: u32) -> f64 {
             _ => s,
         };
     }
-    // 24 bits: the representable neighbours below and above the exact result
+    let r = round24(s, err, rc);
+    // a store beyond a float's range: as the FPU's masked overflow, infinity or the largest
+    // float by the rounding (truncating: the largest; SSE's conversion gives the same)
+    if op == FpuOp::Round as u32 && r.abs() > f32::MAX as f64 {
+        let toward_inf = match rc {
+            0 => true,
+            1 => r < 0.0,
+            2 => r > 0.0,
+            _ => false,
+        };
+        return if toward_inf { r.signum() * f64::INFINITY } else { r.signum() * f32::MAX as f64 };
+    }
+    r
+}
+
+/// s + e (e a rounding error given by its sign) rounded to 24 bits by rounding control rc.
+fn round24(s: f64, err: i32, rc: u32) -> f64 {
+    // the representable neighbours below and above the exact result
     let lo = floor24(s, err);
     let hi = -floor24(-s, -err);
     if lo == hi {

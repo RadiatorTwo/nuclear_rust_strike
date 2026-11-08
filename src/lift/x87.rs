@@ -91,6 +91,10 @@ impl Lifter<'_, '_> {
         self.xc.d = 0;
         self.xc.cw = None;
         self.xc.mode = None;
+        // the end of a run's 0xc7f version: the SSE rounding as it was
+        if let Some(old) = self.rz.take() {
+            self.b.ins().call(self.refs.mxcsr_set, &[old]);
+        }
     }
 
     fn mode(&mut self) -> Mode {
@@ -122,7 +126,7 @@ impl Lifter<'_, '_> {
     }
 
     /// The control word (I16).
-    fn fcw(&mut self) -> Value {
+    pub(super) fn fcw(&mut self) -> Value {
         if let Some(v) = self.xc.cw.filter(|_| self.xc.enabled) {
             return v;
         }
@@ -285,6 +289,9 @@ impl Lifter<'_, '_> {
     /// or 64 bits to nearest. 24 bits to nearest or truncating (the renderer's 0xc7f) are
     /// done here too (`round24`); anything else goes to `rt_fpu_round`.
     fn arith(&mut self, op: FpuOp, x: Value, y: Value) -> Value {
+        if self.rz.is_some() {
+            return self.arith_rz(op, x, y);
+        }
         let fast = match op {
             FpuOp::Add => self.b.ins().fadd(x, y),
             FpuOp::Sub => self.b.ins().fsub(x, y),
@@ -308,6 +315,64 @@ impl Lifter<'_, '_> {
         let (ok, r) = self.round24(op, x, y, s, cw);
         self.b.ins().brif(ok, done, &[r.into()], call_blk, &[]);
         self.b.switch_to_block(call_blk);
+        let o = self.iconst(I32, op as i64);
+        let call = self.b.ins().call(self.refs.fpu_round, &[o, x, y, cw]);
+        let r = self.b.inst_results(call)[0];
+        self.b.ins().jump(done, &[r.into()]);
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
+    /// x op y under the control word 0xc7f, in a run's version where the SSE rounding
+    /// truncates too (`Lifter::versions`): the double result is the exact one truncated, and
+    /// truncating it to 24 bits gives the FPU's result, if it is a normal double or an exact
+    /// zero; else `rt_fpu_round`. The result's test is the condition of a branch: the operation
+    /// is made there, after the SSE mode changed, not moved elsewhere by Cranelift.
+    fn arith_rz(&mut self, op: FpuOp, x: Value, y: Value) -> Value {
+        const UNIT: i64 = 1 << 29;
+        let s = match op {
+            FpuOp::Add => self.b.ins().fadd(x, y),
+            FpuOp::Sub => self.b.ins().fsub(x, y),
+            FpuOp::Mul => self.b.ins().fmul(x, y),
+            FpuOp::Div => self.b.ins().fdiv(x, y),
+            FpuOp::Sqrt => self.b.ins().sqrt(x),
+            FpuOp::Round => unreachable!("a store under 0xc7f is fdemote"),
+        };
+        let bits = self.b.ins().bitcast(I64, mf(), s);
+        let mag = self.b.ins().band_imm_u(bits, i64::MAX);
+        // (not the largest double: truncating, an overflow gives it)
+        let from_lo = self.b.ins().iadd_imm_s(mag, -0x0010_0000_0000_0000);
+        let normal = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, from_lo, 0x7fdf_ffff_ffff_ffff);
+        // cut in a vector register (see `round24_between`)
+        let le = mf().with_endianness(Endianness::Little);
+        let v = self.b.ins().scalar_to_vector(F64X2, s);
+        let v = self.b.ins().bitcast(I64X2, le, v);
+        let mask = self.b.func.dfg.constants.insert((!(UNIT - 1)).to_le_bytes().repeat(2).into());
+        let mask = self.b.ins().vconst(I64X2, mask);
+        let v = self.b.ins().band(v, mask);
+        let v = self.b.ins().bitcast(F64X2, le, v);
+        let r = self.b.ins().extractlane(v, 0);
+        let (other, call_blk, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(done, F64);
+        self.b.ins().brif(normal, done, &[r.into()], other, &[]);
+        // zero: exact unless a product or quotient of nonzero numbers came out below the
+        // doubles' range (a sum of doubles is zero only if exact)
+        self.b.switch_to_block(other);
+        let zero = self.b.ins().icmp_imm_u(IntCC::Equal, mag, 0);
+        let f0 = self.b.ins().f64const(0.0);
+        let exact = match op {
+            FpuOp::Mul => {
+                let (xz, yz) = (self.b.ins().fcmp(FloatCC::Equal, x, f0), self.b.ins().fcmp(FloatCC::Equal, y, f0));
+                self.b.ins().bor(xz, yz)
+            }
+            FpuOp::Div => self.b.ins().fcmp(FloatCC::Equal, x, f0),
+            _ => self.iconst(I8, 1),
+        };
+        let zero = self.b.ins().band(zero, exact);
+        self.b.ins().brif(zero, done, &[s.into()], call_blk, &[]);
+        self.b.switch_to_block(call_blk);
+        let cw = self.fcw();
+        let cw = self.b.ins().uextend(I32, cw);
         let o = self.iconst(I32, op as i64);
         let call = self.b.ins().call(self.refs.fpu_round, &[o, x, y, cw]);
         let r = self.b.inst_results(call)[0];
@@ -549,7 +614,10 @@ impl Lifter<'_, '_> {
                 } else if mem0 {
                     let v = self.st(0);
                     let a = self.addr(i);
-                    let v = if i.memory_size() == MemorySize::Float32 {
+                    let v = if i.memory_size() == MemorySize::Float32 && self.rz.is_some() {
+                        // the SSE rounding truncates as the control word says
+                        self.b.ins().fdemote(F32, v)
+                    } else if i.memory_size() == MemorySize::Float32 {
                         // rounded to a float as the control word says
                         let v = self.arith(FpuOp::Round, v, v);
                         self.b.ins().fdemote(F32, v)

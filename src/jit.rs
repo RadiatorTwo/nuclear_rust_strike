@@ -88,6 +88,8 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
     jb.symbol("rt_rdtsc", rt::rt_rdtsc as *const u8);
     jb.symbol("rt_x87", rt::rt_x87 as *const u8);
     jb.symbol("rt_fpu_round", rt::rt_fpu_round as *const u8);
+    jb.symbol("rt_mxcsr_rz", rt::rt_mxcsr_rz as *const u8);
+    jb.symbol("rt_mxcsr_set", rt::rt_mxcsr_set as *const u8);
     jb.symbol("rt_yield", rt::rt_yield as *const u8);
     jb.symbol("rt_hook", rt::rt_hook as *const u8);
     jb.symbol("rt_poll", &rt::POLL as *const _ as *const u8);
@@ -114,6 +116,8 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
     let h_x87 = decl("rt_x87", &sig(host_cc, &[ptr, I32, I32], None));
     let h_yield = decl("rt_yield", &sig(host_cc, &[ptr, I32], None));
     let h_fpu_round = decl("rt_fpu_round", &sig(host_cc, &[I32, F64, F64, I32], Some(F64)));
+    let h_mxcsr_rz = decl("rt_mxcsr_rz", &sig(host_cc, &[], Some(I32)));
+    let h_mxcsr_set = decl("rt_mxcsr_set", &sig(host_cc, &[I32], None));
     let h_hook = decl("rt_hook", &sig(host_cc, &[ptr, I32], None));
     let d_poll = module.declare_data("rt_poll", Linkage::Import, true, false).unwrap();
 
@@ -165,6 +169,8 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
                         rdtsc: module.declare_func_in_func(h_rdtsc, b.func),
                         x87: module.declare_func_in_func(h_x87, b.func),
                         fpu_round: module.declare_func_in_func(h_fpu_round, b.func),
+                        mxcsr_rz: module.declare_func_in_func(h_mxcsr_rz, b.func),
+                        mxcsr_set: module.declare_func_in_func(h_mxcsr_set, b.func),
                         yield_: module.declare_func_in_func(h_yield, b.func),
                         poll: module.declare_data_in_func(d_poll, b.func),
                         guest_sig: b.import_signature(guest_sig.clone()),
