@@ -26,6 +26,10 @@
 //! when flying forward and turning, then crashes, 2026-11-08). Both get a larger buffer of
 //! ours instead (`trapezoid_rows`, `trapezoid_tiles`; they are called from there only).
 //!
+//! The mission menu (R: SMFD_Enter_ .. SMFD_Exit_) is 4:3 from its start: it draws its frame
+//! once when it opens, and the target, still wide for the HUD's last frames, turned 4:3
+//! afterwards: made anew, black (2026-11-08).
+//!
 //! The aspect follows the window, set at every grBufferSwap (`set_aspect`): wide while the
 //! HUD is drawn (a mission), else 4:3. Setting `widescreen` (F10 menu); `NSTRIKE_WIDE=<aspect>`
 //! forces an aspect (0: off).
@@ -38,6 +42,11 @@ use std::time::{Duration, Instant};
 
 pub const SET_WINDOW: u32 = 0x48d7d0;
 pub const VIEWPORT_INIT: u32 = 0x46f368;
+pub const SMFD_ENTER: u32 = 0x48ea28;
+pub const SMFD_EXIT: u32 = 0x48ec64;
+
+/// The mission menu is open.
+static SMFD: AtomicBool = AtomicBool::new(false);
 pub const TRAPEZOID_ROWS: u32 = 0x4672bc;
 pub const TRAPEZOID_TILES: u32 = 0x4676d4;
 
@@ -99,7 +108,19 @@ static BASE: AtomicU32 = AtomicU32::new(0);
 static WINDOW_3D: AtomicBool = AtomicBool::new(true);
 
 fn mission() -> bool {
-    SEEN.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+    !SMFD.load(Ordering::Relaxed) && SEEN.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+}
+
+/// SMFD_Enter_: the target 4:3 before the menu draws (see the module's comment).
+pub fn smfd_enter(c: &mut Cpu) {
+    SMFD.store(true, Ordering::Relaxed);
+    glide::follow_window();
+    call_original(c, SMFD_ENTER);
+}
+
+pub fn smfd_exit(c: &mut Cpu) {
+    call_original(c, SMFD_EXIT);
+    SMFD.store(false, Ordering::Relaxed);
 }
 
 /// View_SetWindow_(eax window, 0: the whole screen): returns 0 when set.

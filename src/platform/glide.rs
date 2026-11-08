@@ -1457,11 +1457,17 @@ fn buffer_swap(c: &mut Cpu) -> u32 {
     if let Some((tex, (w, h), gamma)) = shown {
         super::window::show_texture(tex, w, h, gamma);
         // the next frame follows the window: its height, and its aspect in a mission
-        let (ww, wh) = super::window::window_size();
-        let a = super::wide::set_aspect(ww as f32 / wh.max(1) as f32);
-        with(|g, gl| g.resize(gl, a, wh));
+        follow_window();
     }
     0
+}
+
+/// Size the target for the window: its height, and its aspect in a mission (between frames:
+/// the buffers are made anew, black).
+pub fn follow_window() {
+    let (ww, wh) = super::window::window_size();
+    let a = super::wide::set_aspect(ww as f32 / wh.max(1) as f32);
+    with(|g, gl| g.resize(gl, a, wh));
 }
 
 /// The coordinate space of the vertices that follow (None: screen pixels).

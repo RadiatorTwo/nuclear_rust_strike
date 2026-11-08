@@ -882,6 +882,8 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (text::CLOCK, text::clock),
     (wide::SET_WINDOW, wide::set_window),
     (wide::VIEWPORT_INIT, wide::viewport_init),
+    (wide::SMFD_ENTER, wide::smfd_enter),
+    (wide::SMFD_EXIT, wide::smfd_exit),
     (wide::TRAPEZOID_ROWS, wide::trapezoid_rows),
     (wide::TRAPEZOID_TILES, wide::trapezoid_tiles),
     (wide::ALLOC_POLY, wide::alloc_poly),
