@@ -83,7 +83,13 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   manager SSMem (0x440dd0...) breaks its free list otherwise (SSMemAllocAlign's padding).
   DeviceIoControl (MEMVXD) fails. Sleep(0) sleeps 1 ms when another
   guest thread runs: guest threads take turns (`turn_take`), and WinMain's PeekMessage/Sleep(0)
-  loop otherwise took the turn back at every loop head of the game thread.
+  loop otherwise took the turn back at every loop head of the game thread. It also sleeps in a
+  thread below normal priority (WinMain's, LOWEST): it yielded at once while the game thread
+  was in host code, took the turn ~340 000 times a second and kept a core busy; the game
+  thread was ~10% slower (2026-11-08). The frame rate still swings in phases of seconds with
+  the same work: the game thread runs on whichever logical CPU Windows picks, and is slower on
+  a core's second hyperthread beside other processes (pinned to one core: ~425 instead of
+  ~375 fps, still swinging; not done).
 - Guest threads (`platform::GuestThread`, 2026-11-08): SuspendThread/ResumeThread (and
   CREATE_SUSPENDED) stop a thread at its next loop head or before guest code after an import
   (never in host code: it holds none of our locks). The turn goes to waiters by

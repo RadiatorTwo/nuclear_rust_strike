@@ -453,7 +453,7 @@ thread_local! {
     static MY_THREAD: std::sync::Arc<GuestThread> = guest_thread(kernel32::thread_id());
 }
 
-fn my_thread() -> std::sync::Arc<GuestThread> {
+pub fn my_thread() -> std::sync::Arc<GuestThread> {
     MY_THREAD.with(|t| t.clone())
 }
 
