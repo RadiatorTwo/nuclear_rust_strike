@@ -44,8 +44,20 @@ pub enum Action {
 }
 
 const RATES: [u32; 6] = [30, 60, 75, 120, 144, 240];
-/// 4:3 window sizes offered (those that fit the display)
-const SIZES: [(u32, u32); 7] = [(960, 720), (1280, 960), (1440, 1080), (1600, 1200), (1920, 1440), (2048, 1536), (2880, 2160)];
+/// window sizes offered (those that fit the display): 4:3, then 16:9 (widescreen)
+const SIZES: [(u32, u32); 11] = [
+    (960, 720),
+    (1280, 960),
+    (1440, 1080),
+    (1600, 1200),
+    (1920, 1440),
+    (2880, 2160),
+    (1280, 720),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
@@ -54,10 +66,11 @@ enum Row {
     FrameRate,
     Msaa,
     Filter,
+    Wide,
     Close,
 }
 
-const ROWS: [Row; 6] = [Row::Fullscreen, Row::Window, Row::FrameRate, Row::Msaa, Row::Filter, Row::Close];
+const ROWS: [Row; 7] = [Row::Fullscreen, Row::Window, Row::FrameRate, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
 
 pub struct Menu {
     sel: usize,
@@ -115,6 +128,7 @@ impl Menu {
                 };
                 (c.iter().map(|&n| text(n)).collect(), c.iter().position(|&n| n == s.texture_filter).unwrap_or(0))
             }
+            Row::Wide => (vec!["Off".into(), "On".into()], s.widescreen as usize),
             Row::Close => (Vec::new(), 0),
         }
     }
@@ -140,6 +154,7 @@ impl Menu {
             Row::FrameRate => super::frames::set_rate(rates(s.frame_rate)[k]),
             Row::Msaa => super::glide::set_msaa(settings::MSAA_CHOICES[k]),
             Row::Filter => super::glide::set_filtering(settings::FILTER_CHOICES[k]),
+            Row::Wide => settings::update(|s| s.widescreen = k == 1),
             Row::Close => {}
         }
         None
@@ -218,6 +233,7 @@ impl Menu {
                 Row::FrameRate => "Frame rate",
                 Row::Msaa => "Anti-aliasing",
                 Row::Filter => "Textures",
+                Row::Wide => "Widescreen",
                 Row::Close => unreachable!(),
             };
             cv.label([rr[0] + 12, rr[1], rr[2], rr[3]], name, TEXT, 0, 2);
@@ -231,6 +247,7 @@ impl Menu {
             Row::Window => "Used when not fullscreen",
             Row::FrameRate => "Pictures a second; missions run 60 a second",
             Row::Filter => "Filtering of textures the game filters",
+            Row::Wide => "Missions as wide as the window, HUD in the middle",
             _ => "",
         };
         cv.label([p[0], p[3] - 46, p[2], p[3] - 30], note, TEXT_OFF, 1, 1);

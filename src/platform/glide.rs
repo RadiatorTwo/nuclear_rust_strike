@@ -34,9 +34,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// The module handle LoadLibraryA gives for glide2x.dll.
 pub const MODULE: u32 = 0x1000_0000;
 
-/// The picture's aspect (no widescreen yet).
-const ASPECT: f32 = 4.0 / 3.0;
-
 /// TMU memory reported: 4 MB.
 const TMU_RAM: u32 = 4 << 20;
 
@@ -1379,8 +1376,10 @@ fn sst_win_open(c: &mut Cpu) -> u32 {
     log!("glide: grSstWinOpen {w}x{h}");
     let mut g = super::window::with_gl(|gl| Glide::open(gl, w, h));
     if let Some(g) = &mut g {
-        let (_, wh) = super::window::window_size();
-        super::window::with_gl(|gl| g.resize(gl, ASPECT, wh));
+        super::wide::reset();
+        let (ww, wh) = super::window::window_size();
+        let a = super::wide::set_aspect(ww as f32 / wh.max(1) as f32);
+        super::window::with_gl(|gl| g.resize(gl, a, wh));
     }
     let ok = g.is_some();
     *GLIDE.lock().unwrap_or_else(|e| e.into_inner()) = g;
@@ -1410,6 +1409,7 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         gl.delete_buffer(g.vbo);
     });
     *GLIDE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    super::wide::reset();
     1
 }
 
@@ -1456,9 +1456,10 @@ fn buffer_swap(c: &mut Cpu) -> u32 {
     });
     if let Some((tex, (w, h), gamma)) = shown {
         super::window::show_texture(tex, w, h, gamma);
-        // the next frame follows the window's height
-        let (_, wh) = super::window::window_size();
-        with(|g, gl| g.resize(gl, ASPECT, wh));
+        // the next frame follows the window: its height, and its aspect in a mission
+        let (ww, wh) = super::window::window_size();
+        let a = super::wide::set_aspect(ww as f32 / wh.max(1) as f32);
+        with(|g, gl| g.resize(gl, a, wh));
     }
     0
 }

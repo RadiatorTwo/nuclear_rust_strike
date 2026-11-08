@@ -259,7 +259,7 @@ fn restore(c: &mut Cpu, s: &Saved) {
 
 /// Call a Watcom register-convention function (eax, edx, ebx, ecx); the caller's registers
 /// are kept.
-fn call(c: &mut Cpu, addr: u32, args: [u32; 4]) -> u32 {
+pub(super) fn call(c: &mut Cpu, addr: u32, args: [u32; 4]) -> u32 {
     let s = save(c);
     (c.r[EAX], c.r[EDX], c.r[EBX], c.r[ECX]) = (args[0], args[1], args[2], args[3]);
     let r = guest_call(c, addr, &[]);
@@ -410,7 +410,9 @@ pub fn death_dot(c: &mut Cpu) {
 }
 
 pub fn hud_draw(c: &mut Cpu) {
+    super::wide::hud(true);
     with_view(c, |c| call_original(c, HUD_DRAW));
+    super::wide::hud(false);
 }
 
 // ---- objects ------------------------------------------------------------------------------------
@@ -611,6 +613,7 @@ pub fn picture(c: &mut Cpu) {
     call(c, FRAME_CHANGE, [arg, 0, 0, 0]);
     let t1 = std::time::Instant::now();
     // from here on the turn is held: what changes in the static data is the picture's
+    super::wide::apply();
     let kept = read(STATICS.0, (STATICS.1 - STATICS.0) as usize);
     state().in_picture = true;
     // no other thread may run until it is put back (the audio timer's changes were lost)

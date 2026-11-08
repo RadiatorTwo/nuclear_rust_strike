@@ -575,10 +575,12 @@ pub fn frame_size() -> (u32, u32) {
     with_host(|h| h.app.gl.as_ref().map_or((640, 480), |g| (g.shown.1, g.shown.2)))
 }
 
-/// The window's drawable size in pixels (1280x960 before it exists).
+/// The window's drawable size in pixels (1280x960 before it exists). Other threads get the
+/// size of its last drawing.
 pub fn window_size() -> (u32, u32) {
     if !on_main() {
-        return (1280, 960);
+        let size = LOOK.lock().unwrap().map(|l| l.size);
+        return size.filter(|s| s.0 > 0 && s.1 > 0).unwrap_or((1280, 960));
     }
     with_host(|h| h.app.window.as_ref().map(|w| w.inner_size()).filter(|s| s.width > 0 && s.height > 0).map_or((1280, 960), |s| (s.width, s.height)))
 }

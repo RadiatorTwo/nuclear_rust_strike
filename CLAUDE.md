@@ -186,8 +186,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `src/settings.rs` (new): the port's settings in `game_files/nstrike.toml` (`key = value`,
   written whole with comments at the first start and on every change: `update`); wrong values
   keep the default and are reported. `get()` = the file with `NSTRIKE_WINDOW`,
-  `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER` over it (not
-  saved). The game's own settings stay in its Config menu / nukepc.sav; the game's menu is
+  `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER`,
+  `NSTRIKE_WIDESCREEN` over it (not saved). The game's own settings stay in its Config menu / nukepc.sav; the game's menu is
   not extended, except for what it has (resolution).
 - `src/platform/text.rs` (new): the text before and after a mission is written letter by
   letter by its own thread (0x49d4d8, `trantextDisplay_`), paced by `clock_` (1/100 s: a
@@ -208,6 +208,19 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   lagged the guest's: the game's Esc menu set the mission start from the guest clock, the
   mission time went back, Slerp_ 0x413f40 looped ~4 billion times: frozen.) Menus outside missions keep running. `NSTRIKE_INPUT` items go through it too
   (`50000:F10 52000:Down 53000:Right`).
+- `src/platform/wide.rs` (new, as future_rust_cop's): widescreen (Hor+) in missions. The
+  projection's x scale `[0x568af0]` (View_SetWindow_ 0x48d7d0 makes it, with the clip margin
+  `[0x568af8]` and bound `[0x568b00]`) is narrowed by k = (4/3) / aspect before every logic
+  frame and picture; the Glide target takes the window's aspect and the 3D picture is
+  stretched over it. The HUD shares the 3D picture's ordering table (its own window only in
+  some HUD modes): primitives made in HUDUserDraw_ (disp_AllocPoly_ hooked) or under another
+  window (message boxes) are drawn in the 4:3 middle (gl_RenderPoly_ hooked, `glide::View`);
+  while the HUD runs the x scale is the 4:3 one. The terrain trapezoid (ViewPort_Init_
+  0x46f368, corners in tiles) is widened by 1/k; its tile count sizes TileMgr's lists at the
+  mission's start, so it is made for at least 16:9. Wide only while the HUD is drawn (else
+  4:3). Setting `widescreen` (F10), `NSTRIKE_WIDE=<aspect>` forces one (0 off).
+  `window::window_size` from other threads reads the size of the window's last drawing (it
+  was 1280x960 there: the Glide target was always 960 high).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

@@ -78,7 +78,13 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
       guest code is ~68% of the game thread. Next: look at other hot functions (0x475a34,
       0x475314: dumps with NSTRIKE_DUMP)
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
-- [ ] High resolution, widescreen, texture filtering, MSAA as in Future Cop
+- [ ] High resolution, texture filtering, MSAA as in Future Cop
+- [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and
+      message boxes in the 4:3 middle, terrain trapezoid widened (sized for 16:9 at least);
+      setting and F10 menu row, 16:9 window sizes in the menu
+- [ ] Widescreen: check target marks over enemies (HUD-level marks placed from 3D positions
+      would need moving, as future_rust_cop's `to_screen`), the cockpit HUD mode, the map
+      screen (SMFD), the text after a mission
 - [x] Mission logic at a fixed 60 frames a second (`frames.rs`); pictures in between at the
       display's rate, objects and camera interpolated (`pictures.rs`, as future_rust_cop's
       `fps.rs`); hook pick-up autopilot fixed for 60 frames
@@ -88,7 +94,7 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 - [x] Overlay menu (`menu.rs`, F10): fullscreen, window size, frame rate, MSAA, texture
       filter; used at once and saved; a mission stands still while it is open. Decided: the
       game's Config menu is not extended, except for what it has already (the resolution)
-- [ ] Overlay menu: gamepad, more settings as they come (widescreen, resolution scale)
+- [ ] Overlay menu: gamepad, more settings as they come (resolution scale)
 
 ### 4. Later
 - [ ] Videos (`videos.res`: format unknown yet)

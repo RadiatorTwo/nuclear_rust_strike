@@ -23,6 +23,7 @@ pub mod pictures;
 pub mod sample;
 pub mod text;
 pub mod user32;
+pub mod wide;
 pub mod window;
 
 pub use crate::image::ResId;
@@ -741,6 +742,10 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (pictures::FRAME_CHANGE, pictures::frame_change),
     (text::THREAD, text::thread),
     (text::CLOCK, text::clock),
+    (wide::SET_WINDOW, wide::set_window),
+    (wide::VIEWPORT_INIT, wide::viewport_init),
+    (wide::ALLOC_POLY, wide::alloc_poly),
+    (wide::RENDER_POLY, wide::render_poly),
 ];
 
 /// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector

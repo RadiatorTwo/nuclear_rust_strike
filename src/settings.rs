@@ -36,11 +36,13 @@ pub struct Settings {
     pub msaa: u32,
     /// one of `FILTER_CHOICES`
     pub texture_filter: u32,
+    /// missions as wide as the window (Hor+), the HUD in the 4:3 middle
+    pub widescreen: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, msaa: 4, texture_filter: 16 }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, msaa: 4, texture_filter: 16, widescreen: true }
     }
 }
 
@@ -86,6 +88,9 @@ pub fn get() -> Settings {
     }
     if let Some(n) = env("NSTRIKE_FILTER").and_then(|v| v.parse().ok()) {
         s.texture_filter = n;
+    }
+    if let Some(v) = env("NSTRIKE_WIDESCREEN") {
+        s.widescreen = v == "1";
     }
     s
 }
@@ -141,6 +146,7 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "frame_rate" => frame_rate(v).map(|r| s.frame_rate = r),
             "msaa" => v.parse().ok().filter(|n| MSAA_CHOICES.contains(n)).map(|n| s.msaa = n),
             "texture_filter" => v.parse().ok().filter(|n| FILTER_CHOICES.contains(n)).map(|n| s.texture_filter = n),
+            "widescreen" => v.parse().ok().map(|b| s.widescreen = b),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -187,11 +193,15 @@ pub fn render(s: &Settings) -> String {
          \n\
          # Texture filtering: 0 the original (bilinear), 1 trilinear mipmaps, 2 to 16 also\n\
          # anisotropic. One of {}.\n\
-         texture_filter = {}\n",
+         texture_filter = {}\n\
+         \n\
+         # Missions as wide as the window (the HUD stays in the 4:3 middle): true or false.\n\
+         widescreen = {}\n",
         s.fullscreen,
         list(MSAA_CHOICES),
         s.msaa,
         list(FILTER_CHOICES),
-        s.texture_filter
+        s.texture_filter,
+        s.widescreen
     )
 }

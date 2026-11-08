@@ -193,7 +193,10 @@ fn logic_frame_us(c: &mut Cpu) -> u64 {
         l.frames = ((now - l.start).as_nanos() / FRAME.as_nanos()) as u64;
     }
     let l = g.as_ref().unwrap();
-    l.start_us + l.frames * 1_000_000 / 60
+    let us = l.start_us + l.frames * 1_000_000 / 60;
+    drop(g);
+    super::wide::logic_frame(c);
+    us
 }
 
 /// sysUpdateTick_ (see the module's comment). Ticks are 1/100 s: `[0x54d914]` the ticks since
