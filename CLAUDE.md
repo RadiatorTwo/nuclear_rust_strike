@@ -170,7 +170,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   lists those that give it up). A thread keeps the turn at loop heads for `SLICE` (0.5 ms,
   `tsc`): the game and controller threads traded it 60 000 times a second.
   `NSTRIKE_SAMPLE=1` (`sample.rs`): a sampling profiler of the game thread (function or host
-  module, every 2 s; `NSTRIKE_SAMPLE_RAW=<file>` all samples, our own code as `nstrike.exe+off`:
+  module, every 2 s; with `NSTRIKE_DUMP=<addr>` that function by offset in its machine code, as
+  the dump shows it; `NSTRIKE_SAMPLE_RAW=<file>` all samples, our own code as `nstrike.exe+off`:
   symbolise with a build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and
   llvm-symbolizer; in system code the stack is unwound to our frame: "ntdll <- nvoglv64 <-
   nstrike.exe+off").

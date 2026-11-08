@@ -83,7 +83,13 @@ fn sample(h: windows_sys::Win32::Foundation::HANDLE) {
         let name = |a: usize, modules: &mut HashMap<usize, Option<(usize, String)>>| {
             if (lo..hi).contains(&a) {
                 let i = starts.partition_point(|s| s.0 <= a);
-                if i == 0 { "?".to_string() } else { crate::image::named(starts[i - 1].1) }
+                match i.checked_sub(1).map(|i| starts[i]) {
+                    None => "?".to_string(),
+                    // the function NSTRIKE_DUMP shows: by place in its machine code (the dump's
+                    // offsets)
+                    Some((p, g)) if crate::jit::dump_of(g) => format!("{}+{:x}", crate::image::named(g), a - p),
+                    Some((_, g)) => crate::image::named(g),
+                }
             } else {
                 module_of(a, modules)
             }

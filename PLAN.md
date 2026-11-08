@@ -84,7 +84,10 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       register, the mode made once a run: projection routines 23.6% -> 16.6% of the game
       thread, ~300 -> ~350 fps unlimited (2026-11-08)
 - [ ] Speed: guest code ~46% of the game thread: vec3fp16_Project*ListASM_ ~17% (under 0xc7f
-      still ~3x the cost of 0x27f in `tests/x87_bench.rs`), 0x475a34 ~7%, 0x475314 ~3%
+      still ~3x the cost of 0x27f in `tests/x87_bench.rs`), 0x475a34 ~7%, 0x475314 ~3%.
+      0x475a34 is the gl_* layer's set-up of each polygon (state calls, colours, clamps): its
+      time spread over all of it; fusing fcom/fnstsw/sahf/jcc (~3 ns a compare) not worth it.
+      Next: versions of a straight run per rounding mode (tested once at its start)
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, texture filtering, MSAA as in Future Cop
 - [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and
