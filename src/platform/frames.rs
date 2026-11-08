@@ -140,11 +140,21 @@ pub fn next_shown() -> Instant {
 /// µs: whole 1/60 s from the mission's start. A computer too slow for 60 runs fewer frames,
 /// each a whole number of 1/60 s long.
 fn logic_frame_us(c: &mut Cpu) -> u64 {
-    // our menu open: the mission stands still (pictures go on), its clock too
+    // Our menu open: the mission stands still (pictures go on). Afterwards the logic clock goes
+    // on with the guest's (by whole ticks), and the mission time `[0x4ed728]` and the last tick
+    // `[0x54d920]` move by as much, as the game's own pause does (strikeClockPause_). The
+    // logic clock lagged the guest's by the pause before (2026-11-08): the game's pause menu
+    // (Esc) then set the mission start from the guest's clock, the mission time went back, and
+    // a time step below 0 ran Slerp_ (0x413f40) some 4 billion times: the game froze.
     if super::menu::is_open() {
         let paused = super::menu::wait_closed(|| super::pictures::picture(c));
+        let ticks = (paused.as_micros() / 10_000) as u32;
         if let Some(l) = LOGIC.lock().unwrap().as_mut() {
-            l.start += paused;
+            l.start += Duration::from_millis(ticks as u64 * 10);
+            l.start_us += ticks as u64 * 10_000;
+            let m = mem();
+            m.wr32(0x4ed728, m.rd32(0x4ed728).wrapping_add(ticks));
+            m.wr32(0x54d920, m.rd32(0x54d920).wrapping_add(ticks));
         }
     }
     let due = {

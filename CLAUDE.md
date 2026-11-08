@@ -202,8 +202,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   and close; raw mouse motion is held back, the cursor shown and released. Changes apply at
   once (`frames::set_rate`, `glide::set_msaa/set_filtering`, fullscreen and window size by
   the window) and are saved. While open, the mission loop waits in `logic_frame_us`
-  (`menu::wait_closed`, drawing pictures so changes show) and its clock start moves on by
-  the pause. Menus outside missions keep running. `NSTRIKE_INPUT` items go through it too
+  (`menu::wait_closed`, drawing pictures so changes show); afterwards the logic clock goes
+  on with the guest's (whole ticks) and the mission start `[0x4ed728]` and last tick
+  `[0x54d920]` move by the pause too, as strikeClockPause_ does. (Before, the logic clock
+  lagged the guest's: the game's Esc menu set the mission start from the guest clock, the
+  mission time went back, Slerp_ 0x413f40 looped ~4 billion times: frozen.) Menus outside missions keep running. `NSTRIKE_INPUT` items go through it too
   (`50000:F10 52000:Down 53000:Right`).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
