@@ -6,8 +6,8 @@
 //! messages). Without all of them it refuses to start ("Unable to initialize audio system").
 //!
 //! Digital samples play from guest memory through the mixer in `dsound.rs` (`dsound::Sample`).
-//! Timers are host threads calling the guest callback. MIDI messages are not played yet
-//! (`NSTRIKE_MIDI_LOG=1` logs them). `NSTRIKE_AIL_LOG=1` logs the calls.
+//! Timers are host threads calling the guest callback. MIDI messages play on a software
+//! synthesizer (`midi.rs`; `NSTRIKE_MIDI_LOG=1` logs them). `NSTRIKE_AIL_LOG=1` logs the calls.
 
 use super::{Import, alloc, arg, free, guest_call, log, mem};
 use crate::rt::Cpu;
@@ -151,6 +151,7 @@ fn wave_out_close(c: &mut Cpu) -> u32 {
 fn midi_out_open(c: &mut Cpu) -> u32 {
     let (drv_p, mo_p) = (arg(c, 0), arg(c, 1));
     ail_log!("AIL_midiOutOpen");
+    super::midi::open();
     let drv = alloc(DRIVER_SIZE);
     let m = mem();
     m.wr32(drv, 0x6d1d); // a HMIDIOUT nobody uses
@@ -447,16 +448,26 @@ fn release_sequence_handle(c: &mut Cpu) -> u32 {
     0
 }
 
-/// AIL_send_channel_voice_message(driver, sequence, status, data1, data2): not played yet.
+/// AIL_send_channel_voice_message(driver, sequence, status, data1, data2).
 fn send_channel_voice_message(c: &mut Cpu) -> u32 {
+    let (st, d1, d2) = (arg(c, 2), arg(c, 3), arg(c, 4));
     if midi_log() {
-        log!("midi {:02x} {:02x} {:02x}", arg(c, 2), arg(c, 3), arg(c, 4));
+        log!("midi {st:02x} {d1:02x} {d2:02x}");
     }
+    super::midi::send(st as u8, d1 as u8, d2 as u8);
     0
 }
 
-fn ret0(_: &mut Cpu) -> u32 {
+/// AIL_set_sequence_volume(sequence, volume 0..127, ms).
+fn set_sequence_volume(c: &mut Cpu) -> u32 {
+    ail_log!("AIL_set_sequence_volume({}, {} ms)", arg(c, 1), arg(c, 2));
+    super::midi::volume(arg(c, 1), arg(c, 2));
     0
+}
+
+fn midi_out_close(c: &mut Cpu) -> u32 {
+    super::midi::close();
+    wave_out_close(c)
 }
 
 pub const IMPORTS: &[Import] = &[
@@ -467,7 +478,7 @@ pub const IMPORTS: &[Import] = &[
     ("_AIL_waveOutOpen@16", 4, wave_out_open),
     ("_AIL_waveOutClose@4", 1, wave_out_close),
     ("_AIL_midiOutOpen@12", 3, midi_out_open),
-    ("_AIL_midiOutClose@4", 1, wave_out_close),
+    ("_AIL_midiOutClose@4", 1, midi_out_close),
     ("_AIL_register_timer@4", 1, register_timer),
     ("_AIL_release_timer_handle@4", 1, release_timer_handle),
     ("_AIL_set_timer_frequency@8", 2, set_timer_frequency),
@@ -476,7 +487,7 @@ pub const IMPORTS: &[Import] = &[
     ("_AIL_stop_timer@4", 1, stop_timer),
     ("_AIL_allocate_sequence_handle@4", 1, allocate_sequence_handle),
     ("_AIL_release_sequence_handle@4", 1, release_sequence_handle),
-    ("_AIL_set_sequence_volume@12", 3, ret0),
+    ("_AIL_set_sequence_volume@12", 3, set_sequence_volume),
     ("_AIL_send_channel_voice_message@20", 5, send_channel_voice_message),
     ("_AIL_allocate_sample_handle@4", 1, allocate_sample_handle),
     ("_AIL_release_sample_handle@4", 1, release_sample_handle),

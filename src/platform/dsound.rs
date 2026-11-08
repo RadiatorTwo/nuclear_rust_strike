@@ -277,6 +277,7 @@ impl Mixer {
         if let Some(s) = &mut self.stream {
             s.mix(out, rate);
         }
+        super::midi::render(out, rate);
     }
 }
 

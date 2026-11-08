@@ -34,8 +34,8 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 
 ### 2. Sound
 - [x] Miles: samples and timers (not checked by ear yet)
-- [ ] MIDI: send_channel_voice_message to a software synthesizer with the game's SoundFont
-      `AUD_IMS1.SF2` (e.g. the rustysynth crate)
+- [x] MIDI music: send_channel_voice_message to rustysynth with the game's SoundFont
+      `AUD_IMS1.SF2` (`midi.rs`), mixed into the sound output
 
 ### 3. Glide on OpenGL
 - [x] `glide.rs` from future_rust_cop's early version (d1f9ad0: batching, mipmaps, MSAA;

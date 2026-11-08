@@ -98,7 +98,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   from winit's DeviceEvent), GetDeviceState and buffered GetDeviceData. `NSTRIKE_DI_LOG=1`.
 - `miles.rs` (new): AIL_* on the dsound mixer (`dsound::Sample`: linear gain, signed 8-bit,
   loop counts; double buffering through `dsound::sample_queue`: speech, waited for); the driver's +0x4c is an IDirectSound (the movie player uses it); timers
-  are threads calling `callback(user)`; MIDI messages are dropped (`NSTRIKE_MIDI_LOG=1`).
+  are threads calling `callback(user)`. MIDI (`midi.rs`, 2026-11-08): the game's sequencer
+  (timer callback 0x497d3c, 60 Hz) sends GM channel voice messages; they play on rustysynth
+  with `data\AUD_IMS1.SF2` (19 presets: exactly the programs the music uses, drums bank 128),
+  queued and applied at the output's next block, mixed in `dsound`'s output callback;
+  AIL_set_sequence_volume ramps the gain (`NSTRIKE_MIDI_LOG=1` logs the messages).
   Without Miles the game stops: "Unable to initialize audio system". `NSTRIKE_AIL_LOG=1`.
 - `dsound.rs`: the primary buffer reports 64 KB (the movie player sizes its buffer by it).
 - `frames.rs` (new): the game's clock (sysUpdateTick_ 0x4823d0 hooked, µs). In a mission the
