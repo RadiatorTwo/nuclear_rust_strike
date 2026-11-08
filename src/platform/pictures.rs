@@ -44,7 +44,6 @@ const DRAW_OT: u32 = 0x47f5b4;
 const AFTER_OT: u32 = 0x46b0e8;
 const MSGBOX_ACTIVE: u32 = 0x49b85c;
 const HUD_PAUSED: u32 = 0x45e7f4;
-const CAMERA_SET_YPR: u32 = 0x41356c;
 const UPDATE_SUN: u32 = 0x410310;
 
 /// Where the mission loop calls disp_FrameChange_ (return address).
@@ -60,6 +59,8 @@ const VIEW_Z: u32 = 0x4ed8f8;
 const CAM_RANGES: [(u32, u32); 2] = [(0x503f2e, 0x503f34), (0x503f54, 0x503f8e)];
 const CAM_POS: u32 = 0x503f54;
 const CAM_YPR: u32 = 0x503f64;
+/// The camera's matrix (3x3 i16, 4.12, rows) made by Camera_SetYPR_; at 0x503f6a its transpose.
+const CAM_MATRIX: u32 = 0x503f7c;
 
 /// The game's static data (DGROUP and .bss): a picture's drawing changes much of it besides
 /// the picture (the random generator, scratch matrices and results the logic reads later,
@@ -137,11 +138,65 @@ impl<T: Copy> Hist<T> {
     }
 }
 
-/// Camera: position and angles.
+/// Camera: position and angles; the angles as StrkCam_Update_ keeps them (16.16 in 1/4096
+/// turns), and the point the camera is placed from with them (`base`, see `cam_offset`).
 #[derive(Clone, Copy)]
 struct Cam {
     pos: [i32; 3],
-    ypr: [u16; 3],
+    fine: [i32; 3],
+    base: [f64; 3],
+    dist: f64,
+    side: f64,
+}
+
+/// StrkCam_Update_'s angles (16.16, the parts above 1/4096 turn dropped for Camera_SetYPR_),
+/// its distance behind the point looked at (`[0x523030]`, doubled in mode 5 `[0x523064]`) and
+/// its sideways shift (`[0x523068]`).
+const CAM_FINE: u32 = 0x52301c;
+const CAM_DIST: u32 = 0x523030;
+const CAM_MODE: u32 = 0x523064;
+const CAM_SIDE: u32 = 0x523068;
+
+/// sin and cos (x 4096) of an angle in 1/4096 turns.
+fn sincos(a: f64) -> (f64, f64) {
+    let (s, c) = (a * std::f64::consts::TAU / 4096.0).sin_cos();
+    (s * 4096.0, c * 4096.0)
+}
+
+/// BuildRotMatrixYXZ_ (angles in 1/4096 turns, not cut to whole ones): the 3x3 matrix in
+/// 4.12, rows.
+fn rot_yxz(a: [f64; 3]) -> [f64; 9] {
+    let ((s0, c0), (s1, c1), (s2, c2)) = (sincos(a[0]), sincos(a[1]), sincos(a[2]));
+    let k = 1.0 / 4096.0;
+    [
+        (s1 * s0 * k * s2 + c1 * c2) * k,
+        (s1 * s0 * k * c2 - c1 * s2) * k,
+        s1 * c0 * k,
+        s2 * c0 * k,
+        c2 * c0 * k,
+        -s0,
+        (c1 * s0 * k * s2 - s1 * c2) * k,
+        (c1 * s0 * k * c2 + s1 * s2) * k,
+        c1 * c0 * k,
+    ]
+}
+
+/// Where StrkCam_Update_ puts the camera from the point it follows: back by the distance
+/// along the matrix's third column (Camera_Move_), then aside by `side` at the heading
+/// (Camera_SetOrigin_).
+fn cam_offset(m: &[f64; 9], heading: f64, dist: f64, side: f64) -> [f64; 3] {
+    let (s, c) = sincos(heading);
+    [(m[2] * dist - s * side) / 4096.0, m[5] * dist / 4096.0, (m[8] * dist - c * side) / 4096.0]
+}
+
+fn fine_angles(f: [i32; 3]) -> [f64; 3] {
+    f.map(|v| v as f64 / 65536.0)
+}
+
+/// Fine angles the short way round (16.16, a turn is 1 << 28).
+fn lerp_fine(a: i32, b: i32, alpha: u32) -> i32 {
+    let d = ((b as i64 - a as i64 + (1 << 27)) & ((1 << 28) - 1)) - (1 << 27);
+    (a as i64 + (d * alpha as i64 >> 8)) as i32
 }
 
 struct State {
@@ -236,12 +291,6 @@ fn lerp(a: i64, b: i64, alpha: u32) -> i64 {
     a + ((b - a) * alpha as i64 >> 8)
 }
 
-/// Angles in 1/4096 turns, the short way round.
-fn lerp_angle(a: u16, b: u16, alpha: u32) -> u16 {
-    let d = ((b as i32 - a as i32 + 2048) & 4095) - 2048;
-    ((a as i32 + (d * alpha as i32 >> 8)) & 4095) as u16
-}
-
 /// The fraction (in 1/256) of the way from the last logic frame's places to the newest at
 /// which a picture shown at `shown` is: a frame behind.
 fn alpha_at(shown: Instant) -> Option<u32> {
@@ -257,10 +306,17 @@ pub fn cam_update(c: &mut Cpu) {
     call_original(c, CAM_UPDATE);
     let Some((_, f)) = frames::logic_frame() else { return };
     let m = mem();
-    let cam = Cam {
-        pos: [0, 4, 8].map(|o| m.rd32(CAM_POS + o) as i32),
-        ypr: [0, 2, 4].map(|o| m.rd16(CAM_YPR + o)),
-    };
+    let pos = [0, 4, 8].map(|o| m.rd32(CAM_POS + o) as i32);
+    let ypr = [0, 2, 4].map(|o| m.rd16(CAM_YPR + o));
+    let fine = [0, 4, 8].map(|o| m.rd32(CAM_FINE + o) as i32);
+    let dist = ((m.rd32(CAM_DIST) as i32) << (m.rd32(CAM_MODE) == 5) as u32) as f64;
+    let side = m.rd32(CAM_SIDE) as i32 as f64;
+    // the point followed: the camera less its offset at the whole angles it was placed with,
+    // with the game's own matrix (ours differs by its rounding: 2/4096 times the distance)
+    let game: [f64; 9] = std::array::from_fn(|k| m.rd16(CAM_MATRIX + 2 * k as u32) as i16 as f64);
+    let off = cam_offset(&game, ypr[1] as f64, dist, side);
+    let base: [f64; 3] = std::array::from_fn(|i| pos[i] as f64 - off[i]);
+    let cam = Cam { pos, fine, base, dist, side };
     let mut s = state();
     let h = Hist::note(s.cam.as_mut(), f, cam);
     s.cam = Some(h);
@@ -284,16 +340,32 @@ fn view(c: &mut Cpu) -> Option<Vec<u8>> {
         return None;
     }
     drop(s);
-    let pos: [i32; 3] = std::array::from_fn(|i| lerp(prev.pos[i] as i64, h.cur.pos[i] as i64, alpha) as i32);
-    let ypr: [u16; 3] = std::array::from_fn(|i| lerp_angle(prev.ypr[i], h.cur.ypr[i], alpha));
+    // The angles from StrkCam_Update_'s own, finer than the whole 1/4096 turns the logic's
+    // camera is made with: those step unevenly (a turn went 7, 8, 6, 8 a frame), and the
+    // camera placed with them swung around the point it follows (the picture shook in turns).
+    let t = alpha as f64 / 256.0;
+    let fine: [i32; 3] = std::array::from_fn(|i| lerp_fine(prev.fine[i], h.cur.fine[i], alpha));
+    let a = fine_angles(fine);
+    let rot = rot_yxz(a);
+    let mix = |x: f64, y: f64| x + (y - x) * t;
+    let off = cam_offset(&rot, a[1], mix(prev.dist, h.cur.dist), mix(prev.side, h.cur.side));
+    let pos: [i32; 3] = std::array::from_fn(|i| (mix(prev.base[i], h.cur.base[i]) + off[i]).round() as i32);
     let actual = ranges_read(&CAM_RANGES);
-    // Camera_SetYPR_(dx yaw, ax pitch, bx roll, ecx -> position): a place for the position on
-    // the stack well below the guest's
-    let p = c.r[ESP] - 0x1000;
-    for (i, v) in pos.iter().enumerate() {
-        mem().wr32(p + 4 * i as u32, *v as u32);
+    // as Camera_SetYPR_ makes it: angles, position, the matrix, its transpose with the
+    // middle row negated
+    let m = mem();
+    for i in 0..3 {
+        m.wr16(CAM_YPR + 2 * i as u32, ((fine[i] >> 16) & 0xfff) as u16);
+        m.wr32(CAM_POS + 4 * i as u32, pos[i] as u32);
     }
-    call(c, CAMERA_SET_YPR, [ypr[1] as u32, ypr[0] as u32, ypr[2] as u32, p]);
+    let q = rot.map(|v| v.round().clamp(-32768.0, 32767.0) as i16);
+    for r in 0..3 {
+        for k in 0..3 {
+            m.wr16(CAM_MATRIX + 2 * (3 * r + k) as u32, q[3 * r + k] as u16);
+            let v = if r == 1 { -q[3 * k + r] } else { q[3 * k + r] };
+            m.wr16(0x503f6a + 2 * (3 * r + k) as u32, v as u16);
+        }
+    }
     call(c, UPDATE_SUN, [0; 4]);
     let v = ranges_read(&CAM_RANGES);
     ranges_write(&CAM_RANGES, &actual);

@@ -118,6 +118,13 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   before the next logic frame is due; else that logic frame runs at once (up to a period
   early, its clock unchanged). Before (2026-11-08), such pictures were clamped to the newest
   frame: steps of 0.69 / 0.31 frame alternating at 120 Hz, moving things looked doubled.
+  The camera of a picture is not made with Camera_SetYPR_: StrkCam_Update_ keeps its angles
+  in 16.16 (`[0x52301c]`..), but builds the camera from whole 1/4096 turns, which step
+  unevenly in a turn (7, 8, 6, 8 a frame) and swing the camera's place (back by `[0x523030]`
+  along the matrix's third column, aside by `[0x523068]`): the picture shook in turns
+  (2026-11-08). Per logic frame the point followed is noted (`base`: the camera less that
+  offset, with the game's own matrix); a picture interpolates the fine angles, builds the
+  matrix in floats (`rot_yxz` = BuildRotMatrixYXZ_) and places the camera from `base`.
   The game thread shows its pictures itself (`window::show_texture` -> `gl::Shared::present`:
   blit and swap with its shared context, right after `frames::pace`; `gl::PAINT` keeps the
   window's thread from drawing at the same time, `window::LOOK` carries overlay, video and
