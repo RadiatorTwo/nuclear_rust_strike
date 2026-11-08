@@ -196,7 +196,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   layer is `gl_*` (0x478cc8...): `gl_ScaledTransferToLFB_` draws 16-bit pictures (movies,
   menu backgrounds) as 128x128 tiles, `gl_CopyBitmap_` saves what is under the cursor with
   grLfbReadRegion (hooked: the save is kept on the GPU and drawn back from there, flags 7 save,
-  6 restore, 0xa the cursor itself), `gl_SetTMUPaletteRange_` the palette. `NSTRIKE_GLIDE_LOG=1` logs downloads.
+  6 restore, 0xa the cursor itself) over rectangles rounded outwards (`target_rect_out`: at 1080 high, scale
+  2.25, an edge on a pixel's middle left cursor lines behind), `gl_SetTMUPaletteRange_` the palette. `NSTRIKE_GLIDE_LOG=1` logs downloads.
 - `src/settings.rs` (new): the port's settings in `game_files/nstrike.toml` (`key = value`,
   written whole with comments at the first start and on every change: `update`); wrong values
   keep the default and are reported. `get()` = the file with `NSTRIKE_WINDOW`,

@@ -990,7 +990,7 @@ impl Glide {
     /// just read to `data` (see `copy_bitmap`).
     fn save(&mut self, gl: &glow::Context, rect: [u32; 4], data: u32, stride: u32) {
         let (fbo, _) = self.read_buffer(gl, 1);
-        let [x, y, w, h] = self.target_rect(rect);
+        let [x, y, w, h] = self.target_rect_out(rect);
         let tex = unsafe {
             let tmp = new_buffer(gl, w.max(1) as u32, h.max(1) as u32);
             gl.disable(glow::SCISSOR_TEST);
@@ -1023,10 +1023,23 @@ impl Glide {
             return false;
         }
         let tex = sv.tex;
-        let rect = self.target_rect([at.0, at.1, size.0, size.1]);
+        let rect = self.target_rect_out([at.0, at.1, size.0, size.1]);
         let fbo = self.draw_fbo(gl);
         self.copy(gl, tex, [0.0, 0.0, 1.0, 1.0], fbo, rect);
         true
+    }
+
+    /// `target_rect` rounded outwards: every pixel a primitive over `rect` may touch. At a
+    /// scale that is no whole number (1080 / 480 = 2.25) an edge falls on a pixel's middle,
+    /// which the GPU draws and a rounded rectangle left out: the cursor, put back over such a
+    /// rectangle, left lines behind (2026-11-08).
+    fn target_rect_out(&self, [x, y, w, h]: [u32; 4]) -> [i32; 4] {
+        let (sx, sy) = (self.target.0 as f32 / self.res.0 as f32, self.target.1 as f32 / self.res.1 as f32);
+        let x0 = ((x as f32 * sx).floor() as i32).max(0);
+        let x1 = (((x + w) as f32 * sx).ceil() as i32).min(self.target.0 as i32);
+        let y0 = (self.target.1 as i32 - ((y + h) as f32 * sy).ceil() as i32).max(0);
+        let y1 = (self.target.1 as i32 - (y as f32 * sy).floor() as i32).min(self.target.1 as i32);
+        [x0, y0, x1 - x0, y1 - y0]
     }
 
     /// Draw what is batched with the current state.
