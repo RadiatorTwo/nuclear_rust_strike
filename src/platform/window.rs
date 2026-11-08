@@ -855,7 +855,11 @@ impl ApplicationHandler for App {
                     w.set_cursor_visible(true);
                     let _ = w.set_cursor_grab(CursorGrabMode::None);
                 }
-                self.push(Input::Focus(f));
+                // a scripted run (NSTRIKE_INPUT) does not take the foreground: only its own
+                // `blur` / `focus` items reach the game (it pauses when deactivated)
+                if !scripted_run() {
+                    self.push(Input::Focus(f));
+                }
             }
             WindowEvent::Moved(_) => {
                 if let Some(w) = &self.window {

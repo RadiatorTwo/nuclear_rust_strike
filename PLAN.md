@@ -1,6 +1,6 @@
 # Plan — what is done, what is open
 
-Updated 2026-11-07. Details on how things work: CLAUDE.md.
+Updated 2026-11-08. Details on how things work: CLAUDE.md.
 
 ## Done
 
@@ -27,8 +27,9 @@ Updated 2026-11-07. Details on how things work: CLAUDE.md.
 ### 1. Platform layer (next)
 - [ ] After the intro video: crash in the software renderer llTextureTri_ 0x4ba360 (read at
       0xffffffd2). Glide first (the goal anyway), then software mode again
-- [ ] SuspendThread is ignored (WindowProc 0x4a13f8 suspends a thread on deactivation?)
-- [ ] Thread priorities are ignored (the movie streamer and the audio timer raise theirs)
+- [x] SuspendThread/ResumeThread: the game suspends its game thread when its window loses the
+      focus (WM_ACTIVATEAPP 0, now sent; the window is not minimised)
+- [x] Thread priorities: the turn goes to the waiting thread with the highest priority
 - [ ] Joysticks in DirectInput
 
 ### 2. Sound

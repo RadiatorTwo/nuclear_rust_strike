@@ -81,9 +81,19 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   gl_CopyBitmap_ (`glide.rs`).
 - `kernel32.rs`: VirtualAlloc is 64 KB aligned (Windows' granularity): the game's memory
   manager SSMem (0x440dd0...) breaks its free list otherwise (SSMemAllocAlign's padding).
-  DeviceIoControl (MEMVXD) fails; SuspendThread is ignored. Sleep(0) sleeps 1 ms when another
+  DeviceIoControl (MEMVXD) fails. Sleep(0) sleeps 1 ms when another
   guest thread runs: guest threads take turns (`turn_take`), and WinMain's PeekMessage/Sleep(0)
   loop otherwise took the turn back at every loop head of the game thread.
+- Guest threads (`platform::GuestThread`, 2026-11-08): SuspendThread/ResumeThread (and
+  CREATE_SUSPENDED) stop a thread at its next loop head or before guest code after an import
+  (never in host code: it holds none of our locks). The turn goes to waiters by
+  SetThreadPriority's priority: a holder yields at once at a loop head when a higher one waits,
+  else after `SLICE`, then politely (behind all waiters: no starvation). The game: WinMain's
+  thread LOWEST, the mission text, `virtual_timer` and a Miles timer callback HIGHEST, the CPU
+  speed test TIME_CRITICAL. Losing the window's focus sends WM_ACTIVATEAPP 0 (`user32`, not in
+  scripted runs): in a mission the game pauses (HUDPauseGame_, P resumes) and suspends its game
+  thread (WindowProc 0x4a13f8; not at the first deactivation: its flag `[0x4eee88]` starts at
+  1); WM_ACTIVATEAPP 1 resumes it. Its ShowWindow(SW_MINIMIZE) is ignored.
 - `dinput.rs` (new): system keyboard (DIK codes from `user32::poll`) and mouse (raw motion
   from winit's DeviceEvent), GetDeviceState and buffered GetDeviceData. `NSTRIKE_DI_LOG=1`.
 - `miles.rs` (new): AIL_* on the dsound mixer (`dsound::Sample`: linear gain, signed 8-bit,

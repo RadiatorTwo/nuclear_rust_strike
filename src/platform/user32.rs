@@ -68,6 +68,8 @@ struct State {
     next: u32,
     main: u32,
     focus: u32,
+    /// the window lost the focus (WM_ACTIVATEAPP 0 sent)
+    inactive: bool,
     queue: VecDeque<Msg>,
     timers: Vec<Timer>,
     /// GetAsyncKeyState: bit 7 down, bit 0 pressed since the last query
@@ -83,6 +85,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     next: 0x10000,
     main: 0,
     focus: 0,
+    inactive: false,
     queue: VecDeque::new(),
     timers: Vec::new(),
     keys: [0; 256],
@@ -182,9 +185,15 @@ fn poll(wait: Duration) {
             }
             Input::Close => s.queue.push_back(m(WM_CLOSE, 0, 0)),
             // The game pauses itself when it is deactivated (WM_ACTIVATEAPP 0), as Windows 98
-            // games did; here it keeps running in the background. Keys held when the window
+            // games did: in a mission its pause menu opens (strikeAppDeactivate_), and its game
+            // thread is suspended until WM_ACTIVATEAPP 1. It also minimises its window
+            // (ShowWindow SW_MINIMIZE), which `show_window` ignores. Keys held when the window
             // loses the focus would never see their release: they are let go.
             Input::Focus(false) => {
+                if !s.inactive && s.wins.get(&hwnd).is_some_and(|w| w.shown) {
+                    s.inactive = true;
+                    s.queue.push_back(m(WM_ACTIVATEAPP, 0, 0));
+                }
                 super::dinput::release_keys();
                 for vk in 0..256 {
                     if s.keys[vk] & 0x80 != 0 {
@@ -193,7 +202,12 @@ fn poll(wait: Duration) {
                     }
                 }
             }
-            Input::Focus(true) | Input::Poke(..) => {}
+            Input::Focus(true) => {
+                if std::mem::take(&mut s.inactive) {
+                    s.queue.push_back(m(WM_ACTIVATEAPP, 1, 0));
+                }
+            }
+            Input::Poke(..) => {}
         }
     }
     let now = super::kernel32::ms_since_start();
@@ -475,6 +489,8 @@ fn destroy_window(c: &mut Cpu) -> u32 {
     1
 }
 
+/// ShowWindow: shows a window; hiding and minimising (the game minimises itself when it loses
+/// the focus) are ignored.
 fn show_window(c: &mut Cpu) -> u32 {
     let (h, cmd) = (arg(c, 0), arg(c, 1));
     let was = st().wins.get(&h).is_some_and(|w| w.shown);
