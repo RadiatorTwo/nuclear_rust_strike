@@ -14,7 +14,7 @@
 
 use super::{Lifter, mf, ty};
 use crate::rt::{Cpu, FpuOp, X87};
-use cranelift_codegen::ir::{InstBuilder, Value, condcodes::FloatCC, condcodes::IntCC, types::*};
+use cranelift_codegen::ir::{Endianness, InstBuilder, Value, condcodes::FloatCC, condcodes::IntCC, types::*};
 use iced_x86::{Instruction, MemorySize, Mnemonic, OpKind, Register};
 use std::mem::offset_of;
 
@@ -109,6 +109,13 @@ impl Lifter<'_, '_> {
         let half = self.iconst(I64, 1 << 28);
         let zero = self.iconst(I64, 0);
         let add = self.b.ins().select(near, half, zero);
+        // stored (nothing reads them): made here once, not again in every operation's block
+        // (Cranelift makes a pure value where it is first used; the operations' blocks do not
+        // dominate each other)
+        let flag = self.b.ins().uextend(I64, near_or_trunc);
+        let at = offset_of!(Cpu, x87_mode) as i32;
+        self.b.ins().store(mf(), add, self.cpu, at);
+        self.b.ins().store(mf(), flag, self.cpu, at + 8);
         let m = Mode { cw, usual, near_or_trunc, add };
         self.xc.mode = Some(m);
         m
@@ -295,7 +302,7 @@ impl Lifter<'_, '_> {
         self.b.append_block_param(done, F64);
         self.b.ins().brif(usual, done, &[fast.into()], slow, &[]);
         self.b.switch_to_block(slow);
-        let (ok, r) = self.round24_between(op, s, md);
+        let (ok, r) = self.round24_between(op, x, y, s, md);
         self.b.ins().brif(ok, done, &[r.into()], edge, &[]);
         self.b.switch_to_block(edge);
         let (ok, r) = self.round24(op, x, y, s, cw);
@@ -309,10 +316,10 @@ impl Lifter<'_, '_> {
         self.b.block_params(done)[0]
     }
 
-    /// The usual case of `round24`, without the error: s between two 24-bit numbers and not
-    /// in their middle (its low 29 bits neither 0 nor 0x10000000), normal (for a store: in a
-    /// float's normal range). (done, the result.)
-    fn round24_between(&mut self, op: FpuOp, s: Value, md: Mode) -> (Value, Value) {
+    /// The usual cases of `round24`: s between two 24-bit numbers and not in their middle (its
+    /// low 29 bits neither 0 nor 0x10000000), or on one without an error; normal (for a store:
+    /// in a float's normal range) or an exact zero. (done, the result.)
+    fn round24_between(&mut self, op: FpuOp, x: Value, y: Value, s: Value, md: Mode) -> (Value, Value) {
         const UNIT: i64 = 1 << 29;
         const HALF: i64 = 1 << 28;
         let bits = self.b.ins().bitcast(I64, mf(), s);
@@ -320,33 +327,57 @@ impl Lifter<'_, '_> {
         let low = self.b.ins().band_imm_u(bits, UNIT - 1);
         let off = self.b.ins().icmp_imm_u(IntCC::NotEqual, low, 0);
         let not_mid = self.b.ins().icmp_imm_u(IntCC::NotEqual, low, HALF);
-        let between = self.b.ins().band(off, not_mid);
+        // or on a 24-bit number without an error: s is the result. The game's results are
+        // often exact (integers times simple factors, stores of 24-bit results): ~20 million
+        // operations a second went to `round24` (2026-11-08). The error is a branch's
+        // condition only, not on the way of the result.
+        // (a store has no error)
+        let exact = (!matches!(op, FpuOp::Round)).then(|| {
+            let e = self.error(op, x, y, s);
+            let zero = self.b.ins().f64const(0.0);
+            self.b.ins().fcmp(FloatCC::Equal, e, zero)
+        });
+        let between = match exact {
+            Some(exact) => {
+                let off_or_exact = self.b.ins().bor(off, exact);
+                self.b.ins().band(off_or_exact, not_mid)
+            }
+            None => not_mid,
+        };
         // the magnitude's bits: a normal double (or a float's normal range for a store)
         let mag = self.b.ins().band_imm_u(bits, i64::MAX);
         let (lo, hi) = if matches!(op, FpuOp::Round) { (0x3810_0000_0000_0000, 0x47f0_0000_0000_0000) } else { (0x0010_0000_0000_0000, 0x7ff0_0000_0000_0000) };
-        let above = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, mag, lo);
-        let below = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, mag, hi);
-        let range = self.b.ins().band(above, below);
+        let from_lo = self.b.ins().iadd_imm_s(mag, -lo);
+        let range = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, from_lo, hi - lo);
+        // or an exact zero (x * 0: ~2 million a second)
+        let zero = self.b.ins().icmp_imm_u(IntCC::Equal, mag, 0);
+        let zero = match exact {
+            Some(exact) => self.b.ins().band(zero, exact),
+            None => zero,
+        };
+        let range = self.b.ins().bor(range, zero);
         let ok = self.b.ins().band(mode, between);
         let ok = self.b.ins().band(ok, range);
-        // to nearest: add half a unit, then cut
-        let r = self.b.ins().iadd(bits, md.add);
-        let r = self.b.ins().band_imm_u(r, !(UNIT - 1));
-        let r = self.b.ins().bitcast(F64, mf(), r);
+        // to nearest: add half a unit, then cut. In a vector register: the result is the next
+        // operation's operand, and moving it to an integer register and back made each
+        // operation of a chain ~8 cycles slower (the check above is only a branch's condition)
+        let le = mf().with_endianness(Endianness::Little);
+        let v = self.b.ins().scalar_to_vector(F64X2, s);
+        let v = self.b.ins().bitcast(I64X2, le, v);
+        let add = self.b.ins().scalar_to_vector(I64X2, md.add);
+        let v = self.b.ins().iadd(v, add);
+        let mask = self.b.func.dfg.constants.insert((!(UNIT - 1)).to_le_bytes().repeat(2).into());
+        let mask = self.b.ins().vconst(I64X2, mask);
+        let v = self.b.ins().band(v, mask);
+        let v = self.b.ins().bitcast(F64X2, le, v);
+        let r = self.b.ins().extractlane(v, 0);
         (ok, r)
     }
 
-    /// x op y rounded to 24 bits, to nearest or truncating, from s (the double nearest the
-    /// exact result) and the sign of s's error: (done, the result). Not done: another control
-    /// word, a subnormal, zero with an error, infinite or NaN (left to `rt_fpu_round`).
-    /// The exact result and s lie on the same side of every 24-bit number and of every middle
-    /// between two, unless s is one of them (its low 29 bits 0, or 0x10000000): then the
-    /// error's sign decides. Mostly the game's results are 24-bit numbers themselves.
-    fn round24(&mut self, op: FpuOp, x: Value, y: Value, s: Value, cw: Value) -> (Value, Value) {
-        const UNIT: i64 = 1 << 29;
-        const HALF: i64 = 1 << 28;
-        // the error e = exact - s (its sign is all that counts)
-        let e = match op {
+    /// The error e = exact - s of x op y (s: the double nearest the exact result); its sign
+    /// is what counts, and whether it is 0.
+    fn error(&mut self, op: FpuOp, x: Value, y: Value, s: Value) -> Value {
+        match op {
             FpuOp::Add | FpuOp::Sub => {
                 // TwoSum
                 let y = if matches!(op, FpuOp::Sub) { self.b.ins().fneg(y) } else { y };
@@ -375,7 +406,19 @@ impl Lifter<'_, '_> {
                 self.b.ins().fma(ns, s, x)
             }
             FpuOp::Round => self.b.ins().f64const(0.0),
-        };
+        }
+    }
+
+    /// x op y rounded to 24 bits, to nearest or truncating, from s (the double nearest the
+    /// exact result) and the sign of s's error: (done, the result). Not done: another control
+    /// word, a subnormal, zero with an error, infinite or NaN (left to `rt_fpu_round`).
+    /// The exact result and s lie on the same side of every 24-bit number and of every middle
+    /// between two, unless s is one of them (its low 29 bits 0, or 0x10000000): then the
+    /// error's sign decides. Mostly the game's results are 24-bit numbers themselves.
+    fn round24(&mut self, op: FpuOp, x: Value, y: Value, s: Value, cw: Value) -> (Value, Value) {
+        const UNIT: i64 = 1 << 29;
+        const HALF: i64 = 1 << 28;
+        let e = self.error(op, x, y, s);
         let fzero = self.b.ins().f64const(0.0);
         let exact = self.b.ins().fcmp(FloatCC::Equal, e, fzero);
         let bits = self.b.ins().bitcast(I64, mf(), s);

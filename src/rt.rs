@@ -38,6 +38,9 @@ pub struct Cpu {
     /// Nonzero: guest code returns all the way out (generated code checks it after every
     /// call). Set by an `Event` handler.
     pub stop: u32,
+    /// Written by generated code only: the x87 rounding mode's values for a run (see
+    /// `lift::x87`'s `mode`)
+    pub x87_mode: [u64; 2],
 }
 
 pub const EAX: usize = 0;
@@ -70,6 +73,7 @@ impl Cpu {
             fcw: 0x37f,
             mm: [0; 8],
             stop: 0,
+            x87_mode: [0; 2],
         }
     }
 }

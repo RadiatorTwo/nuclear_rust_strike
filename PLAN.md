@@ -80,8 +80,11 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       unlimited: ~240-280 -> ~300-340 fps, drawing a picture 3.0-3.6 -> 2.2-2.7 ms (the 520
       above was before pictures, widescreen and the later fixes). A mapped ring buffer instead
       of glBufferData per batch and cached uniforms gained ~3%, within the noise: left out
-- [ ] Speed: guest code ~48% of the game thread, the projection routines
-      (vec3fp16_Project*ListASM_) ~22%, then 0x475a34 ~6%, 0x475314 ~3% (NSTRIKE_DUMP)
+- [x] Speed: x87 24-bit rounding's usual cases cover exact results and zeros, cut in a vector
+      register, the mode made once a run: projection routines 23.6% -> 16.6% of the game
+      thread, ~300 -> ~350 fps unlimited (2026-11-08)
+- [ ] Speed: guest code ~46% of the game thread: vec3fp16_Project*ListASM_ ~17% (under 0xc7f
+      still ~3x the cost of 0x27f in `tests/x87_bench.rs`), 0x475a34 ~7%, 0x475314 ~3%
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, texture filtering, MSAA as in Future Cop
 - [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and

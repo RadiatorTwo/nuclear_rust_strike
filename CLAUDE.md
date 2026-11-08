@@ -157,7 +157,15 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's
   sign from TwoSum/fma decides); only other modes, subnormals and infinities call
   `rt_fpu_round` (it took 24% of the game thread). `tests/x87.rs` `x87_precision` checks it
-  against `rt_fpu_round`. `rt_lookup` (indirect calls) reads a dense table over the code;
+  against `rt_fpu_round`. The common cases (`round24_between`, 2026-11-08, ~300 -> ~350 fps):
+  s between two 24-bit numbers, or on one with no error (exact: the error from TwoSum/fma is
+  only a branch's condition), or an exact zero; the game's results are often exact (~20
+  million a second went to the slow `round24`, its branch mispredicted). The cut is done in a
+  vector register (`vpaddq`/`vpand`, not via an integer register: the next operation waits
+  for it); the mode's values are stored once a run into `Cpu::x87_mode` (nobody reads them:
+  without a use in a dominating block Cranelift made them again in every operation's block).
+  `tests/x87_bench.rs` (ignored; `--ignored --nocapture`) times a projection-like loop per
+  point under 0xc7f and 0x27f. `rt_lookup` (indirect calls) reads a dense table over the code;
   thunk addresses miss at once. Glide imports that never wait keep the turn (`SLOW_GLIDE`
   lists those that give it up). A thread keeps the turn at loop heads for `SLICE` (0.5 ms,
   `tsc`): the game and controller threads traded it 60 000 times a second.
