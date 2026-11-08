@@ -842,7 +842,7 @@ fn query_performance_counter(c: &mut Cpu) -> u32 {
 }
 
 fn sleep(c: &mut Cpu) -> u32 {
-    let ms = arg(c, 0);
+    let ms = super::text::sleep_ms(arg(c, 0));
     // Sleep(0) gives the rest of the time slice to the threads that are ready. Guest threads run
     // one at a time here, and a thread back from an import waits for the running one to hand
     // over at a loop head: the game's message loop (PeekMessageA, Sleep(0)) took the turn

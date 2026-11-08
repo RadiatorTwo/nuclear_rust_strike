@@ -189,6 +189,12 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER` over it (not
   saved). The game's own settings stay in its Config menu / nukepc.sav; the game's menu is
   not extended, except for what it has (resolution).
+- `src/platform/text.rs` (new): the text before and after a mission is written letter by
+  letter by its own thread (0x49d4d8, `trantextDisplay_`), paced by `clock_` (1/100 s: a
+  picture and a letter every 10 ticks, 30 after a line; between them `Sleep(ticks * 10)`).
+  Written 4 times as fast (`SPEED`, not a setting): in that thread (hooked, thread-local
+  flag) `clock_` (0x4a5c7e, hooked) runs 4 times as fast and `Sleep` is 4 times shorter
+  (kernel32 `sleep`). Mission 1's text: 8.4 s originally, 3.4 s at 3x.
 - `src/platform/menu.rs` (new): our menu, F10 (VK 0x79, not passed to the game). Drawn into
   the window's overlay (640x480 ARGB, over the picture's 4:3 middle; font `font.rs` from
   future_rust_cop). `window.rs` owns the `Menu` while open: `App::push` hands it all input
