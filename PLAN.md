@@ -75,9 +75,13 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [x] Speed: x87 24-bit rounding inline, dense call lookup, fewer turn hand-overs (~+25%)
 - [x] Speed: x87 stack kept in Cranelift values along straight runs, control word tests once
       per run, a GL uniform lookup per frame cached (~415 -> ~520 fps unlimited)
-- [ ] Speed: integer registers and flags across instructions are Cranelift variables already;
-      guest code is ~68% of the game thread. Next: look at other hot functions (0x475a34,
-      0x475314: dumps with NSTRIKE_DUMP)
+- [x] Speed: the alpha test is a vertex attribute, not a batch's state (it ended 97% of the
+      batches: ~250 draws a picture, the driver ~10% of the game thread). 2026-11-08, CPU-bound,
+      unlimited: ~240-280 -> ~300-340 fps, drawing a picture 3.0-3.6 -> 2.2-2.7 ms (the 520
+      above was before pictures, widescreen and the later fixes). A mapped ring buffer instead
+      of glBufferData per batch and cached uniforms gained ~3%, within the noise: left out
+- [ ] Speed: guest code ~48% of the game thread, the projection routines
+      (vec3fp16_Project*ListASM_) ~22%, then 0x475a34 ~6%, 0x475314 ~3% (NSTRIKE_DUMP)
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, texture filtering, MSAA as in Future Cop
 - [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and

@@ -46,8 +46,6 @@ struct State {
     linear: bool,
     clamp: (bool, bool),
     clip: [i32; 4],
-    /// the alpha test: function (GR_CMP_*) and reference value
-    alpha_test: (u32, u32),
 }
 
 /// Where the following drawing goes in the frame.
@@ -151,6 +149,10 @@ struct Glide {
     ac: [u32; 5],
     constant: u32,
     tex: Option<u32>,
+    /// the alpha test: function (GR_CMP_*) and reference value. A vertex attribute too: the
+    /// game changes it between almost all primitives (it ended 97% of the batches, ~250 draws
+    /// a picture, 2026-11-08)
+    alpha_test: (u32, u32),
     /// uniform locations
     uniforms: Uniforms,
     /// vertices waiting to be drawn with `state` (`VERTEX` words each): x y r g b a s t,
@@ -326,7 +328,6 @@ uniform int chroma;
 uniform vec3 key;
 uniform int linear_filter;
 uniform int edge;      // how the chroma key's soft edge is applied (see `flush`)
-uniform ivec2 alpha_test; // GR_CMP_* function, reference value
 in vec4 vcol;
 noperspective in vec2 st;
 flat in vec4 konst;    // the constant colour
@@ -445,7 +446,7 @@ void main() {
     cc_inv = int(vmode.z & 1u);
     ac_inv = int((vmode.z >> 1) & 1u);
     use_tex = int((vmode.z >> 2) & 1u);
-    layer = int(vmode.z >> 8);
+    layer = int((vmode.z >> 8) & 0xffu);
     tex_size = ivec2(vmode.w & 0xffffu, vmode.w >> 16);
     float cover = 1.0;
     vec4 t = use_tex != 0 ? sample_tex(cover) : vec4(1.0);
@@ -463,8 +464,9 @@ void main() {
     vec3 cf = factor3(cc.y, c_local, a_local, a_other, t.a);
     vec3 c = clamp(combine3(cc.x, cf, c_local, a_local, c_other), 0.0, 1.0);
     if (cc_inv != 0) c = 1.0 - c;
-    int ai = int(round(a * 255.0)), ar = alpha_test.y;
-    int f = alpha_test.x;
+    // the alpha test: GR_CMP_* function, reference value
+    int ai = int(round(a * 255.0)), ar = int(vmode.z >> 24);
+    int f = int((vmode.z >> 16) & 7u);
     bool pass = f == 7 || (f == 1 && ai < ar) || (f == 2 && ai == ar) || (f == 3 && ai <= ar)
         || (f == 4 && ai > ar) || (f == 5 && ai != ar) || (f == 6 && ai >= ar);
     if (!pass) discard;
@@ -491,7 +493,6 @@ struct Uniforms {
     key: Option<glow::UniformLocation>,
     linear_filter: Option<glow::UniformLocation>,
     edge: Option<glow::UniformLocation>,
-    alpha_test: Option<glow::UniformLocation>,
 }
 
 impl Uniforms {
@@ -507,7 +508,6 @@ impl Uniforms {
             key: u("key"),
             linear_filter: u("linear_filter"),
             edge: u("edge"),
-            alpha_test: u("alpha_test"),
         }
     }
 }
@@ -668,8 +668,8 @@ impl Glide {
                     linear: false,
                     clamp: (true, true),
                     clip: [0, 0, w as i32, h as i32],
-                    alpha_test: (7, 0),
                 },
+                alpha_test: (7, 0),
                 batch: Vec::new(),
                 batch_mode: glow::TRIANGLES,
                 gamma: 1.0,
@@ -1079,7 +1079,6 @@ impl Glide {
             let key = s.key;
             gl.uniform_3_f32(u.key.as_ref(), (key >> 16 & 0xff) as f32 / 255.0, (key >> 8 & 0xff) as f32 / 255.0, (key & 0xff) as f32 / 255.0);
             gl.uniform_1_i32(u.linear_filter.as_ref(), s.linear as i32);
-            gl.uniform_2_i32(u.alpha_test.as_ref(), s.alpha_test.0 as i32, s.alpha_test.1 as i32);
             // blending: Glide factors 0 zero, 1 src alpha, 2 src/dst colour, 3 dst alpha, 4 one,
             // 5 1 - src alpha, 6 1 - src/dst colour, 7 1 - dst alpha
             let factor = |f: u32, dst: bool| match f {
@@ -1150,7 +1149,8 @@ impl Glide {
         let k = self.constant;
         let ch = |sh: u32| ((k >> sh & 0xff) as f32 / 255.0).to_bits();
         let konst = [ch(16), ch(8), ch(0), ch(24)];
-        // the combine units a byte each, then invert bits, texturing and the layer, its size
+        // the combine units a byte each, then invert bits, texturing, the layer and the alpha
+        // test, the texture's size
         let bytes = |u: [u32; 5]| u[0] | u[1] << 8 | u[2] << 16 | u[3] << 24;
         if let Some(a) = self.tex {
             self.refresh(gl, a);
@@ -1159,7 +1159,7 @@ impl Glide {
         let mode = [
             bytes(self.cc),
             bytes(self.ac),
-            (self.cc[4] & 1) | (self.ac[4] & 1) << 1 | (tex.is_some() as u32) << 2 | tex.map_or(0, |t| t.layer) << 8,
+            (self.cc[4] & 1) | (self.ac[4] & 1) << 1 | (tex.is_some() as u32) << 2 | tex.map_or(0, |t| t.layer) << 8 | self.alpha_test.0 << 16 | self.alpha_test.1 << 24,
             tex.map_or(0, |t| t.w | t.h << 16),
         ];
         // Glide's s and t span 0..256 over the texture's longer side, at any size: in texels
@@ -1686,13 +1686,13 @@ fn tex_download_table_partial(c: &mut Cpu) -> u32 {
 
 fn alpha_test_function(c: &mut Cpu) -> u32 {
     let f = arg(c, 0) & 7;
-    with(|g, gl| g.set(gl, |s| s.alpha_test.0 = f));
+    with(|g, _| g.alpha_test.0 = f);
     0
 }
 
 fn alpha_test_reference(c: &mut Cpu) -> u32 {
     let v = arg(c, 0) & 0xff;
-    with(|g, gl| g.set(gl, |s| s.alpha_test.1 = v));
+    with(|g, _| g.alpha_test.1 = v);
     0
 }
 

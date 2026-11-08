@@ -166,7 +166,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   symbolise with a build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and
   llvm-symbolizer; in system code the stack is unwound to our frame: "ntdll <- nvoglv64 <-
   nstrike.exe+off").
-- x87 registers cached (2026-11-07, ~415 -> ~520 fps with the next item): `lift/x87.rs`
+- x87 registers cached (2026-11-07, ~415 -> ~520 fps with the next item; outdated: 2026-11-08
+  ~240-280 fps, CPU-bound as always): `lift/x87.rs`
   `Cache` keeps ST(i) as Cranelift values along straight runs of instructions (by place
   relative to TOP at the run's start), with the control word and its rounding tests (`Mode`);
   written back by `x87_settle` before join points (`Lifter::joins`: branch targets), anything
@@ -190,7 +191,9 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `show_texture` from there hands the texture over with a fence (`SHOW`). The game draws from
   two threads (the game's, and `trantext` for the text before and after a mission): Glide's
   state is global (`GLIDE` mutex); what contexts do not share (framebuffers, VAOs) is made
-  per thread (`Local`), and with two threads every call ends with glFlush (swaps and clears always do). The TMU's
+  per thread (`Local`), and with two threads every call ends with glFlush (swaps and clears always do). The alpha
+  test is a vertex attribute (the game changes it between almost all primitives: one draw
+  each, 2026-11-08); a batch ends only at a change of blend, chroma key, filter, clamp, clip. The TMU's
   memory (texture arrays, textures, palette) outlives grSstWinClose (`KEPT`), as on the card.
   `NSTRIKE_SHOT_MS` sets the picture interval of NSTRIKE_SHOT. The game's Glide
   layer is `gl_*` (0x478cc8...): `gl_ScaledTransferToLFB_` draws 16-bit pictures (movies,
