@@ -231,7 +231,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   window (message boxes) are drawn in the 4:3 middle (gl_RenderPoly_ hooked, `glide::View`);
   while the HUD runs the x scale is the 4:3 one. The terrain trapezoid (ViewPort_Init_
   0x46f368, corners in tiles) is widened by 1/k; its tile count sizes TileMgr's lists at the
-  mission's start, so it is made for at least 16:9. Wide only while the HUD is drawn (else
+  mission's start, so it is made for at least 16:9. The visible tiles come from
+  0x467b04: 0x4672bc writes the trapezoid's rows into a stack buffer (`[ebp-168h]`, 64 rows),
+  0x4676d4 reads them; the wide trapezoid, turned, has more and overwrote the saved ebp
+  (streaks of missing terrain flying forward and turning, then crashes): both hooked onto a
+  buffer of ours (2026-11-08). Wide only while the HUD is drawn (else
   4:3). Setting `widescreen` (F10), `NSTRIKE_WIDE=<aspect>` forces one (0 off).
   `window::window_size` from other threads reads the size of the window's last drawing (it
   was 1280x960 there: the Glide target was always 960 high).

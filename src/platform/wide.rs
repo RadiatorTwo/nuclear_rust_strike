@@ -19,6 +19,13 @@
 //! TileMgr's lists at the mission's start, so that is made for at least 16:9 then; a wider
 //! window later widens the trapezoid only up to it.
 //!
+//! The visible tiles are found by 0x467b04: 0x4672bc writes the trapezoid's rows (from +0x10,
+//! 4 bytes a row) into a buffer on its stack (`[ebp-168h]`, room for 64 rows) and 0x4676d4
+//! reads them. The wide trapezoid, turned, has more rows: they overwrote 0x467b04's saved
+//! registers, and Rndr_TerrainRender_ went on with a wrong ebp (streaks of missing terrain
+//! when flying forward and turning, then crashes, 2026-11-08). Both get a larger buffer of
+//! ours instead (`trapezoid_rows`, `trapezoid_tiles`; they are called from there only).
+//!
 //! The aspect follows the window, set at every grBufferSwap (`set_aspect`): wide while the
 //! HUD is drawn (a mission), else 4:3. Setting `widescreen` (F10 menu); `NSTRIKE_WIDE=<aspect>`
 //! forces an aspect (0: off).
@@ -31,6 +38,8 @@ use std::time::{Duration, Instant};
 
 pub const SET_WINDOW: u32 = 0x48d7d0;
 pub const VIEWPORT_INIT: u32 = 0x46f368;
+pub const TRAPEZOID_ROWS: u32 = 0x4672bc;
+pub const TRAPEZOID_TILES: u32 = 0x4676d4;
 
 /// The mission's 3D view window in HUD modes with their own HUD window.
 const VIEW_3D: u32 = 0x51f1a4;
@@ -237,4 +246,23 @@ pub fn logic_frame(c: &mut Cpu) {
     widened(corners, w, || {
         pictures::call(c, VIEWPORT_INIT, [zoom, corners, ebx, ecx]);
     });
+}
+
+/// The rows buffer for 0x4672bc and 0x4676d4 (see the module's comment): 0x10 bytes of header,
+/// then 4 bytes a row.
+fn rows_buffer() -> u32 {
+    static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *B.get_or_init(|| super::alloc(0x10 + 4 * 2048))
+}
+
+/// 0x4672bc(eax rows buffer, edx corners, ...): the trapezoid's rows, into our buffer.
+pub fn trapezoid_rows(c: &mut Cpu) {
+    c.r[EAX] = rows_buffer();
+    call_original(c, TRAPEZOID_ROWS);
+}
+
+/// 0x4676d4(eax rows buffer, edx ...): the tiles from those rows.
+pub fn trapezoid_tiles(c: &mut Cpu) {
+    c.r[EAX] = rows_buffer();
+    call_original(c, TRAPEZOID_TILES);
 }
