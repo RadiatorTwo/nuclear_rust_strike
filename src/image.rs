@@ -89,6 +89,23 @@ impl Image {
         )
     }
 
+    /// Replaces the bytes at a virtual address (in a section's raw data) when they are `old`.
+    pub fn patch(&mut self, addr: u32, old: &[u8], new: &[u8]) -> Result<(), String> {
+        assert_eq!(old.len(), new.len());
+        let s = self
+            .sections
+            .iter()
+            .find(|s| addr >= s.va && addr + old.len() as u32 <= s.va + s.rsize)
+            .ok_or_else(|| format!("patch at {addr:#x}: not in a section's data"))?;
+        let at = (s.raw + addr - s.va) as usize;
+        let bytes = &mut self.data[at..at + old.len()];
+        if bytes != old {
+            return Err(format!("patch at {addr:#x}: {bytes:02x?} instead of {old:02x?}"));
+        }
+        bytes.copy_from_slice(new);
+        Ok(())
+    }
+
     pub fn byte(&self, addr: u32) -> u8 {
         self.read(addr, 1).map_or(0, |b| b[0])
     }

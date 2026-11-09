@@ -27,7 +27,10 @@ fn run() -> u32 {
         eprintln!("{text}");
         std::process::exit(2)
     });
-    let img = Image::load(&exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
+    let mut img = Image::load(&exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
+    for &(addr, old, new) in nstrike::platform::PATCHES {
+        img.patch(addr, old, new).unwrap_or_else(|e| panic!("{e}"));
+    }
     let t = Instant::now();
     let ranges = nstrike::cv::functions(&nstrike::cv::publics(&img.data), TEXT_END);
     let mut code = Code::new(&img);

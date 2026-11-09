@@ -265,7 +265,14 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   (streaks of missing terrain flying forward and turning, then crashes): both hooked onto a
   buffer of ours (2026-11-08). The mission menu (R, SMFD_Enter_/SMFD_Exit_ hooked) is 4:3 from its
   start: it draws its frame once, and the target, still wide for the HUD's last 250 ms, turned
-  4:3 afterwards, made anew black (`glide::follow_window` at SMFD_Enter_). Wide only while the HUD is drawn (else
+  4:3 afterwards, made anew black (`glide::follow_window` at SMFD_Enter_). The cockpit HUD
+  modes (1 and 2; H cycles 0, 1, 2, off) are 4:3 as well (HUDUserModeSet_ 0x45f2b4 hooked).
+  The game allows them only at 640x480: both checks are patched out (`wide::PATCHES`, applied
+  to the image before compiling by `Image::patch`, which checks the old bytes); the panel is
+  placed and scaled by the screen's size already. HUDUserDraw_ draws the whole panel only when
+  `[0x51f1b9]` says so, else the changing parts: when the Glide target is made anew (4:3,
+  window size, MSAA) `wide::redraw` sets it for the next two HUD frames.
+  The HUD places nothing from 3D positions; 3D sprites size by the x scale. Wide only while the HUD is drawn (else
   4:3). Setting `widescreen` (F10), `NSTRIKE_WIDE=<aspect>` forces one (0 off).
   `window::window_size` from other threads reads the size of the window's last drawing (it
   was 1280x960 there: the Glide target was always 960 high).

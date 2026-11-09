@@ -780,6 +780,8 @@ impl Glide {
         if !resized && self.ms.map_or(0, |m| m.1) == samples {
             return;
         }
+        // the target's pictures are gone: the HUD's parts drawn only once are drawn again
+        super::wide::redraw();
         if let Some((rb, _)) = self.ms.take() {
             // the framebuffers on it (other threads' are left: they cannot be deleted here)
             let key = (false, rb.0.get());

@@ -90,15 +90,17 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       `tests/x87_bench.rs`: two helper calls a run for MXCSR), 0x475314 ~2%.
       0x475a34 is the gl_* layer's set-up of each polygon (state calls, colours, clamps): its
       time spread over all of it; fusing fcom/fnstsw/sahf/jcc (~3 ns a compare) not worth it.
-      Next: versions of a straight run per rounding mode (tested once at its start)
 - [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
 - [ ] High resolution, texture filtering, MSAA as in Future Cop
 - [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and
       message boxes in the 4:3 middle, terrain trapezoid widened (sized for 16:9 at least);
       setting and F10 menu row, 16:9 window sizes in the menu
-- [ ] Widescreen: check target marks over enemies (HUD-level marks placed from 3D positions
-      would need moving, as future_rust_cop's `to_screen`), the cockpit HUD mode, the map
-      screen (SMFD), the text after a mission
+- [x] Widescreen checked (2026-11-09): the HUD places nothing from 3D positions (HUDUserDraw_
+      and its helpers never project); 3D sprites (0x423008, 0x430970) size their width by the
+      x scale, so they stay round when stretched. The cockpit HUD modes (1, 2: H cycles them) are 4:3 (they were drawn stretched and in
+      parts twice), and work at any resolution (the game allowed them only at 640x480:
+      patched; the panel is redrawn whole when the Glide target is made anew).
+      The map screen (SMFD) is 4:3. The text after a mission is drawn outside the HUD: 4:3
 - [x] Mission logic at a fixed 60 frames a second (`frames.rs`); pictures in between at the
       display's rate, objects and camera interpolated (`pictures.rs`, as future_rust_cop's
       `fps.rs`); hook pick-up autopilot fixed for 60 frames

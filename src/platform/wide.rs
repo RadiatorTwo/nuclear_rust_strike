@@ -30,6 +30,18 @@
 //! once when it opens, and the target, still wide for the HUD's last frames, turned 4:3
 //! afterwards: made anew, black (2026-11-08).
 //!
+//! The cockpit HUD modes (1 and 2: only at the game's 640x480; H cycles 0, 1, 2, off) are 4:3
+//! too: a panel over the whole screen around a smaller 3D window, drawn whole once by
+//! HUDUserModeSet_ and then only in parts. Stretched, it was drawn wide and its parts again in
+//! the 4:3 middle (2026-11-09). HUDUserModeSet_ makes the target 4:3 before it draws.
+//!
+//! The game allows the cockpit modes only at 640x480 (HUDPrimInit_ makes the panel only there,
+//! the HUD key skips them elsewhere); both checks are patched out (`PATCHES`), and the panel,
+//! placed and scaled by the screen's size already, works at any resolution. HUDUserDraw_ draws
+//! the whole panel only when its flag `[0x51f1b9]` says so (after a mode change), else the parts
+//! that change: a target made anew (4:3, window size, MSAA) lost the rest. The flag is set for
+//! the next two HUD frames then (`redraw`: one for each buffer).
+//!
 //! The aspect follows the window, set at every grBufferSwap (`set_aspect`): wide while the
 //! HUD is drawn (a mission), else 4:3. Setting `widescreen` (F10 menu); `NSTRIKE_WIDE=<aspect>`
 //! forces an aspect (0: off).
@@ -47,6 +59,17 @@ pub const SMFD_EXIT: u32 = 0x48ec64;
 
 /// The mission menu is open.
 static SMFD: AtomicBool = AtomicBool::new(false);
+pub const HUD_MODE_SET: u32 = 0x45f2b4;
+
+/// The cockpit HUD at any resolution (the game allows it only at 640x480): HUDPrimInit_ makes
+/// its panel (`jmp 461833`: past the check), and the HUD key goes from mode 0 to 1
+/// (HUDCommandProcess_, `jmp 45e403`).
+pub const PATCHES: &[(u32, &[u8], &[u8])] = &[
+    (0x461804, &[0xa1, 0x24, 0x2f, 0x52, 0x00], &[0xeb, 0x2d, 0x90, 0x90, 0x90]),
+    (0x45e3e3, &[0x8b, 0x15, 0x24, 0x2f, 0x52, 0x00], &[0xeb, 0x1e, 0x90, 0x90, 0x90, 0x90]),
+];
+/// A cockpit HUD mode is set.
+static COCKPIT: AtomicBool = AtomicBool::new(false);
 pub const TRAPEZOID_ROWS: u32 = 0x4672bc;
 pub const TRAPEZOID_TILES: u32 = 0x4676d4;
 
@@ -63,6 +86,16 @@ const NARROW: f32 = 4.0 / 3.0;
 
 /// k as f32 bits; 1.0 is off.
 static K: AtomicU32 = AtomicU32::new(0x3f80_0000);
+
+/// HUD frames still to draw the whole cockpit panel (`redraw`).
+static REDRAW: AtomicU32 = AtomicU32::new(0);
+/// HUDUserDraw_'s flag: draw the whole cockpit panel.
+const DRAW_ALL: u32 = 0x51f1b9;
+
+/// The Glide target was made anew: the cockpit panel is drawn whole again (both buffers).
+pub fn redraw() {
+    REDRAW.store(2, Ordering::Relaxed);
+}
 
 /// When the HUD was last drawn: frames are wide shortly after.
 static SEEN: Mutex<Option<Instant>> = Mutex::new(None);
@@ -108,7 +141,7 @@ static BASE: AtomicU32 = AtomicU32::new(0);
 static WINDOW_3D: AtomicBool = AtomicBool::new(true);
 
 fn mission() -> bool {
-    !SMFD.load(Ordering::Relaxed) && SEEN.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+    !SMFD.load(Ordering::Relaxed) && !COCKPIT.load(Ordering::Relaxed) && SEEN.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(250))
 }
 
 /// SMFD_Enter_: the target 4:3 before the menu draws (see the module's comment).
@@ -121,6 +154,16 @@ pub fn smfd_enter(c: &mut Cpu) {
 pub fn smfd_exit(c: &mut Cpu) {
     call_original(c, SMFD_EXIT);
     SMFD.store(false, Ordering::Relaxed);
+}
+
+/// HUDUserModeSet_(eax HUD, edx mode: 0 plain, 1 and 2 cockpit, 0xff off): the target 4:3
+/// before a cockpit mode draws its panel, wide again at the next swap after it.
+pub fn hud_mode_set(c: &mut Cpu) {
+    let cockpit = matches!(c.r[EDX], 1 | 2);
+    if cockpit != COCKPIT.swap(cockpit, Ordering::Relaxed) && cockpit {
+        glide::follow_window();
+    }
+    call_original(c, HUD_MODE_SET);
 }
 
 /// View_SetWindow_(eax window, 0: the whole screen): returns 0 when set.
@@ -173,6 +216,9 @@ thread_local! {
 /// with the x scale of 4:3 (HOMObjectIconDraw_ sizes its sprites by it).
 pub fn hud(on: bool) {
     if on {
+        if REDRAW.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok() {
+            mem().wr8(DRAW_ALL, 1);
+        }
         *SEEN.lock().unwrap() = Some(Instant::now());
         HUD.with(|h| h.borrow_mut().clear());
         scale(1.0);
@@ -287,3 +333,4 @@ pub fn trapezoid_tiles(c: &mut Cpu) {
     c.r[EAX] = rows_buffer();
     call_original(c, TRAPEZOID_TILES);
 }
+

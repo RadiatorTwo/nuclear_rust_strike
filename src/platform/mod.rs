@@ -865,6 +865,9 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 }
 
 /// Game functions replaced by our own (`jit::compile`).
+/// Changes to the game's code before it is compiled: (address, its bytes, the new ones).
+pub const PATCHES: &[(u32, &[u8], &[u8])] = wide::PATCHES;
+
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear), (glide::COPY_BITMAP, glide::copy_bitmap),
     (frames::UPDATE_TICK, frames::update_tick),
     (frames::AUTOPILOT, frames::autopilot),
@@ -884,6 +887,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (wide::VIEWPORT_INIT, wide::viewport_init),
     (wide::SMFD_ENTER, wide::smfd_enter),
     (wide::SMFD_EXIT, wide::smfd_exit),
+    (wide::HUD_MODE_SET, wide::hud_mode_set),
     (wide::TRAPEZOID_ROWS, wide::trapezoid_rows),
     (wide::TRAPEZOID_TILES, wide::trapezoid_tiles),
     (wide::ALLOC_POLY, wide::alloc_poly),
