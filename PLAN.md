@@ -25,8 +25,8 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 ## Open
 
 ### 1. Platform layer (next)
-- [ ] After the intro video: crash in the software renderer llTextureTri_ 0x4ba360 (read at
-      0xffffffd2). Glide first (the goal anyway), then software mode again
+- [-] Software renderer (crash in llTextureTri_ 0x4ba360 after the intro video): not needed,
+      Glide only (decided 2026-11-09)
 - [x] SuspendThread/ResumeThread: the game suspends its game thread when its window loses the
       focus (WM_ACTIVATEAPP 0, now sent; the window is not minimised)
 - [x] Thread priorities: the turn goes to the waiting thread with the highest priority
@@ -95,7 +95,7 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       compositor kept tearing away anyway). Pacing stays ours: below the display's rate the
       driver queues a picture and returns at once (swap and glFinish never waited at 480 Hz),
       so the swap cannot say when the refresh is; glFinish after it bought nothing
-- [ ] High resolution, texture filtering, MSAA as in Future Cop
+- [x] High resolution, texture filtering, MSAA as in Future Cop
 - [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and
       message boxes in the 4:3 middle, terrain trapezoid widened (sized for 16:9 at least);
       setting and F10 menu row, 16:9 window sizes in the menu
@@ -108,7 +108,8 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [x] Mission logic at a fixed 60 frames a second (`frames.rs`); pictures in between at the
       display's rate, objects and camera interpolated (`pictures.rs`, as future_rust_cop's
       `fps.rs`); hook pick-up autopilot fixed for 60 frames
-- [ ] recomp_kit: the generic part of fixed logic rate + pictures between frames, GUIDE section
+- [x] recomp_kit: the generic part of fixed logic rate + pictures between frames, GUIDE 8b;
+      widescreen GUIDE 8c; code patches, vsync, drawing-once lessons (2026-11-09)
 - [x] Settings file `game_files/nstrike.toml` (`settings.rs`): window, fullscreen (Alt+Enter
       saves it), frame rate, MSAA, texture filter; `NSTRIKE_*` override for one run
 - [x] Overlay menu (`menu.rs`, F10): fullscreen, window size, frame rate, MSAA, texture
@@ -117,7 +118,7 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [ ] Overlay menu: gamepad, more settings as they come (resolution scale)
 
 ### 4. Later
-- [ ] Videos (`videos.res`: format unknown yet)
+- [x] Videos (`videos.res`)
 - [ ] Gamepads, Linux
 - [ ] Unsupported instructions in discovered code (Aas 204, Iretd 15, Les 6, ...): mostly data
       decoded as code? Check which functions they are in, and whether any runs
