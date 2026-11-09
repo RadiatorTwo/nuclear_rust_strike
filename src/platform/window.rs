@@ -431,7 +431,7 @@ pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
             l.shown = (tex, w, h, false, gamma);
             SHARED.with_borrow(|sh| {
                 let s = sh.as_ref()?;
-                if let Some((px, pw, ph)) = s.present(&l, shot_due(false)) {
+                if let Some((px, pw, ph)) = s.present(&l, shot_due(false), super::frames::vsync()) {
                     write_shot(&px, pw, ph);
                 }
                 Some(l)

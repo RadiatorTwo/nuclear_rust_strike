@@ -4,7 +4,7 @@ use nstrike::settings::{parse, render, FrameRate, Settings};
 fn written_file_reads_back() {
     let all = [
         Settings::default(),
-        Settings { window: Some((1920, 1080)), fullscreen: true, frame_rate: FrameRate::Fps(144), msaa: 8, texture_filter: 0, widescreen: false },
+        Settings { window: Some((1920, 1080)), fullscreen: true, frame_rate: FrameRate::Fps(144), vsync: false, msaa: 8, texture_filter: 0, widescreen: false },
         Settings { frame_rate: FrameRate::Unlimited, ..Settings::default() },
     ];
     for s in all {

@@ -90,7 +90,11 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       `tests/x87_bench.rs`: two helper calls a run for MXCSR), 0x475314 ~2%.
       0x475a34 is the gl_* layer's set-up of each polygon (state calls, colours, clamps): its
       time spread over all of it; fusing fcom/fnstsw/sahf/jcc (~3 ns a compare) not worth it.
-- [ ] Present with vsync (now without: tearing possible); frames paced by the display itself
+- [x] Vsync, setting `vsync` (F10 menu, `NSTRIKE_VSYNC`, default on; 2026-11-09): the game
+      thread's context swaps with interval 1 (fullscreen: the swaps' times then fall on whole refreshes; in a window the
+      compositor kept tearing away anyway). Pacing stays ours: below the display's rate the
+      driver queues a picture and returns at once (swap and glFinish never waited at 480 Hz),
+      so the swap cannot say when the refresh is; glFinish after it bought nothing
 - [ ] High resolution, texture filtering, MSAA as in Future Cop
 - [x] Widescreen (Hor+) in missions (`wide.rs`): 3D picture as wide as the window, HUD and
       message boxes in the 4:3 middle, terrain trapezoid widened (sized for 16:9 at least);

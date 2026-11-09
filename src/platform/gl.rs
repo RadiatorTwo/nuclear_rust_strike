@@ -342,6 +342,8 @@ pub struct Shared {
     surface: *const Surface<WindowSurface>,
     /// for drawing into the window (vertex arrays are not shared)
     vao: glow::VertexArray,
+    /// the swap waits for the display's refresh (vsync)
+    vsync: std::cell::Cell<bool>,
 }
 
 impl SharedParts {
@@ -350,21 +352,28 @@ impl SharedParts {
         let display = self.display;
         let gl = unsafe { glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s)) };
         let vao = unsafe { gl.create_vertex_array() }.expect("GL vertex array");
-        Shared { gl, context, surface: self.surface, vao }
+        Shared { gl, context, surface: self.surface, vao, vsync: std::cell::Cell::new(false) }
     }
 }
 
 impl Shared {
     /// Draw `l` into the window and show it at once, from this thread (the window's thread
     /// shows at its next turn: pictures came 1 to 7 ms apart instead of 4.2).
-    pub fn present(&self, l: &Look, shot: bool) -> Option<(Vec<u32>, u32, u32)> {
+    /// With `vsync` the picture changes at the display's refresh (no tearing); the caller
+    /// paces at the refresh rate itself (a swap that waits keeps it in step).
+    pub fn present(&self, l: &Look, shot: bool, vsync: bool) -> Option<(Vec<u32>, u32, u32)> {
         let _p = PAINT.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the window's surface lives as long as the window (see SharedParts)
+        let surface = unsafe { &*self.surface };
+        if vsync != self.vsync.replace(vsync) {
+            let interval = if vsync { SwapInterval::Wait(std::num::NonZeroU32::MIN) } else { SwapInterval::DontWait };
+            let _ = surface.set_swap_interval(&self.context, interval);
+        }
         // Glide sets its viewport only when its view changes
         let mut vp = [0i32; 4];
         unsafe { self.gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp) };
         let out = paint(&self.gl, self.vao, l, shot);
-        // SAFETY: the window's surface lives as long as the window (see SharedParts)
-        let _ = unsafe { &*self.surface }.swap_buffers(&self.context);
+        let _ = surface.swap_buffers(&self.context);
         unsafe { self.gl.viewport(vp[0], vp[1], vp[2], vp[3]) };
         out
     }

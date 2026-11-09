@@ -32,6 +32,8 @@ pub struct Settings {
     /// borderless over the whole display
     pub fullscreen: bool,
     pub frame_rate: FrameRate,
+    /// the picture changes only at the display's refresh (no tearing)
+    pub vsync: bool,
     /// samples per pixel, one of `MSAA_CHOICES`
     pub msaa: u32,
     /// one of `FILTER_CHOICES`
@@ -42,7 +44,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, msaa: 4, texture_filter: 16, widescreen: true }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true }
     }
 }
 
@@ -82,6 +84,9 @@ pub fn get() -> Settings {
     }
     if let Some(r) = env("NSTRIKE_FRAMERATE").and_then(|v| frame_rate(&v)) {
         s.frame_rate = r;
+    }
+    if let Some(v) = env("NSTRIKE_VSYNC") {
+        s.vsync = v == "1";
     }
     if let Some(n) = env("NSTRIKE_MSAA").and_then(|v| v.parse().ok()) {
         s.msaa = n;
@@ -144,6 +149,7 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             },
             "fullscreen" => v.parse().ok().map(|b| s.fullscreen = b),
             "frame_rate" => frame_rate(v).map(|r| s.frame_rate = r),
+            "vsync" => v.parse().ok().map(|b| s.vsync = b),
             "msaa" => v.parse().ok().filter(|n| MSAA_CHOICES.contains(n)).map(|n| s.msaa = n),
             "texture_filter" => v.parse().ok().filter(|n| FILTER_CHOICES.contains(n)).map(|n| s.texture_filter = n),
             "widescreen" => v.parse().ok().map(|b| s.widescreen = b),
@@ -188,6 +194,10 @@ pub fn render(s: &Settings) -> String {
          # Frames a second: \"display\" (the display's refresh rate), \"unlimited\", or a number.\n\
          frame_rate = {rate}\n\
          \n\
+         # Vertical sync: the picture changes only at the display's refresh (no tearing; at most\n\
+         # the display's refresh rate): true or false.\n\
+         vsync = {}\n\
+         \n\
          # Anti-aliasing (MSAA), samples per pixel: {} (0 off).\n\
          msaa = {}\n\
          \n\
@@ -198,6 +208,7 @@ pub fn render(s: &Settings) -> String {
          # Missions as wide as the window (the HUD stays in the 4:3 middle): true or false.\n\
          widescreen = {}\n",
         s.fullscreen,
+        s.vsync,
         list(MSAA_CHOICES),
         s.msaa,
         list(FILTER_CHOICES),

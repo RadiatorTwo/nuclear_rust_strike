@@ -151,6 +151,9 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   window size over). The window's thread showed them at its next turn: 1.2 to 7 ms apart at
   240 fps while their contents were 4.2 ms apart (the helicopter shook against the ground).
   `pace` sleeps up to 1.5 ms before the due time and spins the rest (now 4.0 to 4.4 ms).
+  With the setting `vsync` (F10, `NSTRIKE_VSYNC`) the shared context swaps with interval 1
+  (`frames::vsync`, set in `Shared::present` when it changes); the pace stays ours (the driver
+  queues pictures while the game is slower than the display: the swap returns at once).
 - The chopper's autopilot (flynVehiIntrBehavior_ 0x4251dc, the hook pick-up flies it over the
   load) steps by time / 0x114 with the rest dropped: at 60 frames (256) no step ever, the
   controls stayed taken. `frames::autopilot` carries the rest. `NSTRIKE_CTRL_LOG=1` logs
@@ -228,7 +231,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `src/settings.rs` (new): the port's settings in `game_files/nstrike.toml` (`key = value`,
   written whole with comments at the first start and on every change: `update`); wrong values
   keep the default and are reported. `get()` = the file with `NSTRIKE_WINDOW`,
-  `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER`,
+  `NSTRIKE_FULLSCREEN`, `NSTRIKE_FRAMERATE`, `NSTRIKE_VSYNC`, `NSTRIKE_MSAA`, `NSTRIKE_FILTER`,
   `NSTRIKE_WIDESCREEN` over it (not saved). The game's own settings stay in its Config menu / nukepc.sav; the game's menu is
   not extended, except for what it has (resolution).
 - `src/platform/text.rs` (new): the text before and after a mission is written letter by

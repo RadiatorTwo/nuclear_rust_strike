@@ -14,10 +14,17 @@
 //! Elsewhere (menus) frames are paced at grBufferSwap, in place of the card's retrace: the
 //! display's refresh rate, or the settings' `frame_rate` (`NSTRIKE_FRAMERATE`: frames a
 //! second, 0 unlimited); the clock is read at the time the frame is due.
+//!
+//! With the setting `vsync` the picture changes only at the display's refresh (no tearing in
+//! fullscreen; in a window the desktop's compositor does that anyway). The pace
+//! stays: the driver queues a picture and returns at once while the game is slower than the
+//! display, so the swap's return says nothing about the refresh; when the pace runs ahead the
+//! swap waits and the pace follows (it falls behind and starts again from then).
 use super::kernel32::guest_us;
 use super::{log, mem};
 use crate::rt::{call_original, Cpu, EAX, ESP};
 use crate::settings::FrameRate;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -52,6 +59,22 @@ pub fn set_rate(r: FrameRate) {
     crate::settings::update(|s| s.frame_rate = r);
     *RATE.lock().unwrap() = Some(r);
     log_rate(r);
+}
+
+/// The picture changes at the display's refresh (the setting `vsync`).
+pub fn vsync() -> bool {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| VSYNC.store(crate::settings::get().vsync, Ordering::Relaxed));
+    VSYNC.load(Ordering::Relaxed)
+}
+
+static VSYNC: AtomicBool = AtomicBool::new(false);
+
+/// Vsync changed (our menu): saved, and used from the next picture on.
+pub fn set_vsync(on: bool) {
+    vsync();
+    crate::settings::update(|s| s.vsync = on);
+    VSYNC.store(on, Ordering::Relaxed);
 }
 
 /// The time the next picture is due (None: unlimited, or none shown yet).

@@ -64,13 +64,14 @@ enum Row {
     Fullscreen,
     Window,
     FrameRate,
+    Vsync,
     Msaa,
     Filter,
     Wide,
     Close,
 }
 
-const ROWS: [Row; 7] = [Row::Fullscreen, Row::Window, Row::FrameRate, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
+const ROWS: [Row; 8] = [Row::Fullscreen, Row::Window, Row::FrameRate, Row::Vsync, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
 
 pub struct Menu {
     sel: usize,
@@ -115,6 +116,7 @@ impl Menu {
                 let k = v.iter().position(|&r| r == s.frame_rate).unwrap();
                 (v.iter().map(|&r| rate_text(r)).collect(), k)
             }
+            Row::Vsync => (vec!["Off".into(), "On".into()], s.vsync as usize),
             Row::Msaa => {
                 let c = settings::MSAA_CHOICES;
                 (c.iter().map(|&n| if n == 0 { "Off".into() } else { format!("{n}x") }).collect(), c.iter().position(|&n| n == s.msaa).unwrap_or(0))
@@ -152,6 +154,7 @@ impl Menu {
                 return Some(Action::Window(z));
             }
             Row::FrameRate => super::frames::set_rate(rates(s.frame_rate)[k]),
+            Row::Vsync => super::frames::set_vsync(k == 1),
             Row::Msaa => super::glide::set_msaa(settings::MSAA_CHOICES[k]),
             Row::Filter => super::glide::set_filtering(settings::FILTER_CHOICES[k]),
             Row::Wide => settings::update(|s| s.widescreen = k == 1),
@@ -231,6 +234,7 @@ impl Menu {
                 Row::Fullscreen => "Fullscreen",
                 Row::Window => "Window size",
                 Row::FrameRate => "Frame rate",
+                Row::Vsync => "Vsync",
                 Row::Msaa => "Anti-aliasing",
                 Row::Filter => "Textures",
                 Row::Wide => "Widescreen",
@@ -246,6 +250,7 @@ impl Menu {
         let note = match ROWS[self.sel] {
             Row::Window => "Used when not fullscreen",
             Row::FrameRate => "Pictures a second; missions run 60 a second",
+            Row::Vsync => "Picture changes at the display's refresh: no tearing",
             Row::Filter => "Filtering of textures the game filters",
             Row::Wide => "Missions as wide as the window, HUD in the middle",
             _ => "",
