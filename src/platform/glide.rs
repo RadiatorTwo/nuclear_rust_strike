@@ -767,9 +767,49 @@ impl Glide {
             self.multisample(gl, false);
             return;
         }
+        // the same aspect (a menu, the window to fullscreen): the pictures are kept, scaled.
+        // The game draws a menu's background once and then only what changes: black buffers
+        // left the menu black. Another aspect (wide and 4:3 in a mission) stays black: what
+        // switches there draws whole (the mission menu, the cockpit panel: `wide::redraw`).
+        let old = self.target;
+        let same = old.0 > 0 && old.1 > 0 && (old.0 as u64 * h as u64).abs_diff(w as u64 * old.1 as u64) <= old.1.max(h) as u64;
+        let kept: Vec<_> = if same { [self.color, self.front, self.aux].map(|t| self.keep(gl, t, old)).into() } else { Vec::new() };
         self.target = (w, h);
         self.size_buffers(gl);
         self.multisample(gl, true);
+        for (t, (fbo, tmp)) in [self.color, self.front, self.aux].into_iter().zip(kept) {
+            let to = self.tex_fbo(gl, t);
+            unsafe {
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to));
+                gl.blit_framebuffer(0, 0, old.0 as i32, old.1 as i32, 0, 0, w as i32, h as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(tmp);
+            }
+        }
+        // with MSAA the game draws on in the multisampled buffer: the back buffer's picture
+        // goes there too (as at a swap)
+        if same && let Some((rb, _)) = self.ms {
+            let ms = self.rb_fbo(gl, rb);
+            self.copy(gl, self.color, [0.0, 0.0, 1.0, 1.0], ms, [0, 0, w as i32, h as i32]);
+        }
+    }
+
+    /// A copy of buffer `t` (of size `size`) in a framebuffer of its own.
+    fn keep(&mut self, gl: &glow::Context, t: glow::Texture, size: (u32, u32)) -> (glow::Framebuffer, glow::Texture) {
+        let tmp = new_buffer(gl, size.0, size.1);
+        let from = self.tex_fbo(gl, t);
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(tmp.0));
+            let (w, h) = (size.0 as i32, size.1 as i32);
+            gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        tmp
     }
 
     /// The multisampled framebuffer for the chosen samples and the target's size (`resized`:

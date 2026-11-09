@@ -438,7 +438,12 @@ pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
             })
         });
         if let Some(l) = shown {
-            *LOOK.lock().unwrap() = Some(l);
+            // only the picture: overlay, video and size are the window's thread's, which may
+            // have changed them while this one drew (writing the whole copy back kept our
+            // closed menu on the screen until it was opened again)
+            if let Some(cur) = LOOK.lock().unwrap().as_mut() {
+                cur.shown = l.shown;
+            }
             let old = SHOW.lock().unwrap().replace((tex, w, h, gamma, None));
             if let Some((.., Some(Fence(f)))) = old {
                 SHARED.with_borrow(|sh| sh.as_ref().map(|s| unsafe { glow::HasContext::delete_sync(&s.gl, f) }));
