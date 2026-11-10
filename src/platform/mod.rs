@@ -7,6 +7,7 @@
 //! puts its result in eax and removes the return address and (stdcall) arguments.
 
 pub mod advapi32;
+pub mod ao;
 pub mod ddraw;
 pub mod dinput;
 pub mod dsound;
@@ -884,6 +885,8 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (text::THREAD, text::thread),
     (text::CLOCK, text::clock),
     (wide::SET_WINDOW, wide::set_window),
+    (wide::GET_WINDOW, wide::get_window),
+    (wide::FREE_WINDOW, wide::free_window),
     (wide::VIEWPORT_INIT, wide::viewport_init),
     (wide::SMFD_ENTER, wide::smfd_enter),
     (wide::SMFD_EXIT, wide::smfd_exit),
@@ -892,6 +895,8 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (wide::TRAPEZOID_TILES, wide::trapezoid_tiles),
     (wide::ALLOC_POLY, wide::alloc_poly),
     (wide::RENDER_POLY, wide::render_poly),
+    (ao::PROJECT_TERRAIN, ao::project_terrain),
+    (ao::PROJECT_MODEL, ao::project_model),
 ];
 
 /// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector
@@ -921,6 +926,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
         m.slice(sec.va, bytes.len()).copy_from_slice(&bytes);
     }
     glide::init();
+    ao::init();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
     m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);

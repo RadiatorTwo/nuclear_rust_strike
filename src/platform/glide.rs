@@ -175,6 +175,26 @@ struct Glide {
     /// pictures `gl_CopyBitmap_` saved from the back buffer (what is under the cursor), at the
     /// target's resolution, newest last
     saved: Vec<Saved>,
+    /// ambient occlusion (`ao.rs`): view-space depth and a mask, a second attachment of the
+    /// framebuffer drawn into, written while the 3D picture is drawn (`gbuf`); the passes,
+    /// and whether they ran in this frame
+    gdepth: Option<Gdepth>,
+    gbuf: bool,
+    posted: bool,
+    ssao: Option<super::ao::Ssao>,
+    /// `add`'s scratch: the vertices' depths
+    zs: Vec<f32>,
+}
+
+/// The depth attachment: its texture (multisampled with MSAA: the samples), its size, the
+/// framebuffers it is attached to, and framebuffers with only their colour (the AO is applied
+/// through one: the depth is read meanwhile). All of the game's thread.
+struct Gdepth {
+    tex: glow::Texture,
+    samples: Option<u32>,
+    size: (u32, u32),
+    attached: Vec<glow::Framebuffer>,
+    colour: HashMap<(bool, u32), glow::Framebuffer>,
 }
 
 /// A rectangle of the back buffer saved by `gl_CopyBitmap_`: where its pixels went in guest
@@ -279,6 +299,8 @@ impl Local {
             gl.vertex_attrib_pointer_i32(4, 4, glow::UNSIGNED_INT, 4 * VERTEX as i32, 48);
             gl.enable_vertex_attrib_array(5);
             gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, 4 * VERTEX as i32, 64);
+            gl.enable_vertex_attrib_array(6);
+            gl.vertex_attrib_pointer_f32(6, 1, glow::FLOAT, false, 4 * VERTEX as i32, 80);
             let fbo = || gl.create_framebuffer().expect("GL framebuffer");
             Local { vao, copy_vao: gl.create_vertex_array().expect("GL vertex array"), mip: [fbo(), fbo()], fbos: HashMap::new() }
         }
@@ -304,7 +326,9 @@ layout(location = 2) in vec2 tc;
 layout(location = 3) in vec4 kc;
 layout(location = 4) in uvec4 mode;
 layout(location = 5) in vec4 box;
+layout(location = 6) in float z;
 out vec4 vcol;
+noperspective out float vinvz;
 noperspective out vec2 st;
 flat out vec4 konst;
 flat out uvec4 vmode;
@@ -315,6 +339,7 @@ void main() {
     st_box = box;
     vmode = mode;
     st = tc;
+    vinvz = z > 0.0 ? 1.0 / z : 0.0;
     gl_Position = vec4(pos.x / space.x * 2.0 - 1.0, 1.0 - pos.y / space.y * 2.0, 0.0, 1.0);
 }
 "#;
@@ -328,12 +353,15 @@ uniform int chroma;
 uniform vec3 key;
 uniform int linear_filter;
 uniform int edge;      // how the chroma key's soft edge is applied (see `flush`)
+uniform int gmode;     // the depth attachment: 0 not written, 1 depth, 2/3 mask (blended/additive)
 in vec4 vcol;
+noperspective in float vinvz;
 noperspective in vec2 st;
 flat in vec4 konst;    // the constant colour
 flat in uvec4 vmode;   // combine units and texture, packed by `add`
 flat in vec4 st_box;   // the primitive's texture rectangle
-out vec4 color;
+layout(location = 0) out vec4 color;
+layout(location = 1) out vec4 gbuf;
 
 ivec4 cc;              // colour combine: function, factor, local, other
 int cc_inv;
@@ -476,11 +504,13 @@ void main() {
     if (edge == 3) c *= cover;
     if (cover <= 0.0) discard;
     color = vec4(c, a);
+    if (gmode == 1) gbuf = vec4(vinvz > 0.0 ? 1.0 / vinvz : 0.0, 0.0, 0.0, step(0.5, a));
+    else gbuf = vec4(0.0, clamp(2.0 * (gmode == 3 ? max(c.r, max(c.g, c.b)) : a), 0.0, 1.0), 0.0, 0.0);
 }
 "#;
 
 /// Words per batched vertex.
-const VERTEX: usize = 20;
+const VERTEX: usize = 21;
 
 /// The shaders' uniforms, looked up once.
 struct Uniforms {
@@ -493,6 +523,7 @@ struct Uniforms {
     key: Option<glow::UniformLocation>,
     linear_filter: Option<glow::UniformLocation>,
     edge: Option<glow::UniformLocation>,
+    gmode: Option<glow::UniformLocation>,
 }
 
 impl Uniforms {
@@ -508,6 +539,7 @@ impl Uniforms {
             key: u("key"),
             linear_filter: u("linear_filter"),
             edge: u("edge"),
+            gmode: u("gmode"),
         }
     }
 }
@@ -679,6 +711,11 @@ impl Glide {
                 copy_prog: compile(gl, COPY_VS, COPY_FS),
                 last_read: None,
                 saved: Vec::new(),
+                gdepth: None,
+                gbuf: false,
+                posted: false,
+                ssao: None,
+                zs: Vec::new(),
             };
             g.size_buffers(gl);
             g
@@ -771,6 +808,7 @@ impl Glide {
         // The game draws a menu's background once and then only what changes: black buffers
         // left the menu black. Another aspect (wide and 4:3 in a mission) stays black: what
         // switches there draws whole (the mission menu, the cockpit panel: `wide::redraw`).
+        self.drop_gbuffer(gl);
         let old = self.target;
         let same = old.0 > 0 && old.1 > 0 && (old.0 as u64 * h as u64).abs_diff(w as u64 * old.1 as u64) <= old.1.max(h) as u64;
         let kept: Vec<_> = if same { [self.color, self.front, self.aux].map(|t| self.keep(gl, t, old)).into() } else { Vec::new() };
@@ -822,6 +860,7 @@ impl Glide {
         }
         // the target's pictures are gone: the HUD's parts drawn only once are drawn again
         super::wide::redraw();
+        self.drop_gbuffer(gl);
         if let Some((rb, _)) = self.ms.take() {
             // the framebuffers on it (other threads' are left: they cannot be deleted here)
             let key = (false, rb.0.get());
@@ -850,6 +889,130 @@ impl Glide {
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
         }
+    }
+
+    /// The depth attachment when the AO is on, at the target's size and samples (made anew
+    /// when they changed), none when it is off.
+    fn gbuffer(&mut self, gl: &glow::Context) {
+        let samples = self.ms.map(|m| m.1);
+        if !super::ao::enabled() || self.gdepth.as_ref().is_some_and(|d| d.size != self.target || d.samples != samples) {
+            self.drop_gbuffer(gl);
+        }
+        if !super::ao::enabled() || self.gdepth.is_some() {
+            return;
+        }
+        let (w, h) = (self.target.0 as i32, self.target.1 as i32);
+        unsafe {
+            let tex = gl.create_texture().expect("GL texture");
+            if let Some(n) = samples {
+                gl.bind_texture(glow::TEXTURE_2D_MULTISAMPLE, Some(tex));
+                gl.tex_image_2d_multisample(glow::TEXTURE_2D_MULTISAMPLE, n as i32, glow::RG32F as i32, w, h, true);
+                gl.bind_texture(glow::TEXTURE_2D_MULTISAMPLE, None);
+            } else {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                for p in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, p, glow::NEAREST as i32);
+                }
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RG32F as i32, w, h, 0, glow::RG, glow::FLOAT, glow::PixelUnpackData::Slice(None));
+            }
+            self.gdepth = Some(Gdepth { tex, samples, size: self.target, attached: Vec::new(), colour: HashMap::new() });
+        }
+    }
+
+    /// The depth attachment on the framebuffer drawn into (this thread's), cleared when new.
+    /// False when it cannot be attached.
+    fn attach(&mut self, gl: &glow::Context, fbo: glow::Framebuffer) -> bool {
+        let Some(d) = &mut self.gdepth else { return false };
+        if d.attached.contains(&fbo) {
+            return true;
+        }
+        let kind = if d.samples.is_some() { glow::TEXTURE_2D_MULTISAMPLE } else { glow::TEXTURE_2D };
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1, kind, Some(d.tex), 0);
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
+            if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                log!("warn: no ambient occlusion (the depth attachment is not taken)");
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1, kind, None, 0);
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                super::ao::set_enabled(false);
+                return false;
+            }
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask_draw_buffer(1, true, true, true, true);
+            gl.clear_buffer_f32_slice(glow::COLOR, 1, &[0.0; 4]);
+            gl.color_mask_draw_buffer(1, false, false, false, false);
+        }
+        d.attached.push(fbo);
+        true
+    }
+
+    /// The depth attachment taken off the framebuffers (those still there) and deleted.
+    fn drop_gbuffer(&mut self, gl: &glow::Context) {
+        let Some(d) = self.gdepth.take() else { return };
+        let live: Vec<glow::Framebuffer> = self.local(gl).fbos.values().copied().collect();
+        let kind = if d.samples.is_some() { glow::TEXTURE_2D_MULTISAMPLE } else { glow::TEXTURE_2D };
+        unsafe {
+            for f in d.attached.into_iter().filter(|f| live.contains(f)) {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1, kind, None, 0);
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            for f in d.colour.into_values() {
+                gl.delete_framebuffer(f);
+            }
+            gl.delete_texture(d.tex);
+        }
+    }
+
+    /// The depth attachment emptied for the next frame.
+    fn clear_gbuffer(&mut self, gl: &glow::Context) {
+        if self.gdepth.is_none() {
+            return;
+        }
+        let fbo = self.draw_fbo(gl);
+        if !self.attach(gl, fbo) {
+            return;
+        }
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask_draw_buffer(1, true, true, true, true);
+            gl.clear_buffer_f32_slice(glow::COLOR, 1, &[0.0; 4]);
+            gl.color_mask_draw_buffer(1, false, false, false, false);
+        }
+    }
+
+    /// A framebuffer with only the colour of the one drawn into.
+    fn colour_fbo(&mut self, gl: &glow::Context) -> Option<glow::Framebuffer> {
+        let key = match self.ms {
+            Some((rb, _)) => (false, rb.0.get()),
+            None => (true, self.color.0.get()),
+        };
+        let (ms, color) = (self.ms, self.color);
+        let d = self.gdepth.as_mut()?;
+        Some(*d.colour.entry(key).or_insert_with(|| unsafe {
+            let f = gl.create_framebuffer().expect("GL framebuffer");
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
+            match ms {
+                Some((rb, _)) => gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(rb)),
+                None => gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(color), 0),
+            }
+            f
+        }))
+    }
+
+    /// The 3D picture is drawn (the HUD comes next): the ambient occlusion over it.
+    fn post_3d(&mut self, gl: &glow::Context) {
+        self.flush(gl);
+        self.gbuf = false;
+        self.posted = true;
+        let Some(out) = self.colour_fbo(gl) else { return };
+        let d = self.gdepth.as_ref().unwrap();
+        let (tex, ms) = (d.tex, d.samples.is_some());
+        let (target, space) = (self.target, self.space);
+        self.ssao.get_or_insert_with(|| super::ao::Ssao::new(gl)).run(gl, tex, ms, target, space, out);
     }
 
     /// The framebuffer drawn into.
@@ -1095,6 +1258,10 @@ impl Glide {
             self.build_mipmaps(gl);
         }
         let fbo = self.draw_fbo(gl);
+        if self.gbuf {
+            self.gbuffer(gl);
+        }
+        let depth = self.gbuf && self.attach(gl, fbo);
         let vao = self.local(gl).vao;
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
@@ -1161,10 +1328,33 @@ impl Glide {
                     gl.blend_func(src, dst);
                 }
             }
+            // the depth attachment: depth from opaque 3D primitives and alpha-blended ones (the
+            // game's solid geometry may be blended with alpha 1), where their alpha is at least
+            // half (the attachment blended with its own alpha 0 or 1); a mask from those that
+            // add colour; nothing from those that only darken (shadows) or the HUD
+            let gmode = match depth {
+                true if opaque || src == glow::SRC_ALPHA && dst == glow::ONE_MINUS_SRC_ALPHA => 1,
+                true if src == glow::ZERO || src == glow::DST_COLOR => 0,
+                true if dst == glow::ONE => 3,
+                true => 2,
+                false => 0,
+            };
+            gl.uniform_1_i32(u.gmode.as_ref(), gmode);
+            match gmode {
+                1 => gl.color_mask_draw_buffer(1, true, true, false, false),
+                2 | 3 => {
+                    gl.color_mask_draw_buffer(1, false, true, false, false);
+                    gl.disable_draw_buffer(glow::BLEND, 1);
+                }
+                _ => {}
+            }
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
             let bytes = std::slice::from_raw_parts(self.batch.as_ptr() as *const u8, self.batch.len() * 4);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
             gl.draw_arrays(self.batch_mode, 0, (self.batch.len() / VERTEX) as i32);
+            if depth {
+                gl.color_mask_draw_buffer(1, false, false, false, false);
+            }
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
         }
@@ -1221,25 +1411,35 @@ impl Glide {
         let xy = |v: u32| (f32::from_bits(m.rd32(v)), f32::from_bits(m.rd32(v + 4)));
         // a line: a quad as wide as the game's line at its resolution
         let quad = if let [v0, v1] = *verts { Some(self.line_offsets(xy(v0), xy(v1))) } else { None };
-        let mut put = |v: u32, (x, y): (f32, f32)| {
+        // the view-space depth of each vertex (3D picture, AO on), by its place
+        let mut z = std::mem::take(&mut self.zs);
+        if self.gbuf && self.gdepth.is_some() {
+            super::ao::depths(verts.iter().map(|&v| xy(v)), &mut z);
+        } else {
+            z.clear();
+            z.resize(verts.len(), 0.0);
+        }
+        let mut put = |v: u32, (x, y): (f32, f32), z: f32| {
             let (s, t) = st(v);
             self.batch.extend([x.to_bits(), y.to_bits(), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()]);
             self.batch.extend(konst);
             self.batch.extend(mode);
             self.batch.extend(b);
+            self.batch.push(z.to_bits());
         };
         if let (Some([n0, n1, n2, n3]), &[v0, v1]) = (quad, verts) {
-            put(v0, n0);
-            put(v0, n1);
-            put(v1, n2);
-            put(v1, n2);
-            put(v0, n1);
-            put(v1, n3);
+            put(v0, n0, z[0]);
+            put(v0, n1, z[0]);
+            put(v1, n2, z[1]);
+            put(v1, n2, z[1]);
+            put(v0, n1, z[0]);
+            put(v1, n3, z[1]);
         } else {
-            for &v in verts {
-                put(v, xy(v));
+            for (&v, &z) in verts.iter().zip(&z) {
+                put(v, xy(v), z);
             }
         }
+        self.zs = z;
     }
 
     /// The corners of a line from `a` to `b` (in the vertices' space) drawn as a quad: a pixel
@@ -1443,6 +1643,10 @@ fn sst_win_open(c: &mut Cpu) -> u32 {
 
 fn sst_win_close(_: &mut Cpu) -> u32 {
     with(|g, gl| unsafe {
+        g.drop_gbuffer(gl);
+        if let Some(mut s) = g.ssao.take() {
+            s.delete(gl);
+        }
         // this thread's own objects (other threads' cannot be deleted here)
         if let Some(l) = g.locals.remove(&std::thread::current().id()) {
             l.delete(gl);
@@ -1493,8 +1697,15 @@ fn buffer_clear(c: &mut Cpu) -> u32 {
 fn buffer_swap(c: &mut Cpu) -> u32 {
     super::frames::pace(arg(c, 0));
     let shown = with(|g, gl| {
+        // no HUD primitive followed the 3D picture (HUD off): the passes now
+        if g.gbuf && !g.posted && g.gdepth.is_some() {
+            g.post_3d(gl);
+        }
         g.flush(gl);
         g.resolve(gl);
+        g.clear_gbuffer(gl);
+        g.gbuf = false;
+        g.posted = false;
         // the buffers trade places, as on the card: the game keeps what is under its cursor
         // for each of them
         std::mem::swap(&mut g.color, &mut g.front);
@@ -1509,6 +1720,7 @@ fn buffer_swap(c: &mut Cpu) -> u32 {
         unsafe { gl.flush() };
         (g.front, g.target, g.gamma)
     });
+    super::ao::clear();
     if let Some((tex, (w, h), gamma)) = shown {
         super::window::show_texture(tex, w, h, gamma);
         // the next frame follows the window: its height, and its aspect in a mission
@@ -1532,6 +1744,25 @@ pub fn set_space(space: Option<(u32, u32)>) {
         if s != g.space {
             g.flush(gl);
             g.space = s;
+        }
+    });
+}
+
+/// The primitives that follow belong to the 3D picture (true) or the HUD (false, the first
+/// of a frame runs the ambient occlusion over the 3D picture).
+pub fn set_3d(on: bool) {
+    with(|g, gl| {
+        if g.posted || on == g.gbuf {
+            return;
+        }
+        if on {
+            g.flush(gl);
+            g.gbuf = true;
+        } else if g.gdepth.is_some() {
+            g.post_3d(gl);
+        } else {
+            g.flush(gl);
+            g.gbuf = false;
         }
     });
 }

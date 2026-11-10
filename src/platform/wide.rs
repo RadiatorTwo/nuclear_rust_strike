@@ -166,6 +166,31 @@ pub fn hud_mode_set(c: &mut Cpu) {
     call_original(c, HUD_MODE_SET);
 }
 
+/// Copies of a screen window made by View_GetWindow_ (a message box saves the window set,
+/// draws under the screen's and sets the copy back: the Esc menu's box every frame). Before,
+/// the copy counted as another window: the x scale stayed 4:3 and the 3D picture stretched,
+/// also after the box closed (2026-11-10).
+static COPIES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+pub const GET_WINDOW: u32 = 0x48d618;
+pub const FREE_WINDOW: u32 = 0x48d77c;
+
+/// View_GetWindow_() -> eax a new copy of the window set.
+pub fn get_window(c: &mut Cpu) {
+    call_original(c, GET_WINDOW);
+    let w = c.r[EAX];
+    if w != 0 && WINDOW_3D.load(Ordering::Relaxed) {
+        COPIES.lock().unwrap().push(w);
+    }
+}
+
+/// View_FreeWindow_(eax window).
+pub fn free_window(c: &mut Cpu) {
+    let w = c.r[EAX];
+    COPIES.lock().unwrap().retain(|&x| x != w);
+    call_original(c, FREE_WINDOW);
+}
+
 /// View_SetWindow_(eax window, 0: the whole screen): returns 0 when set.
 pub fn set_window(c: &mut Cpu) {
     let w = c.r[EAX];
@@ -174,7 +199,7 @@ pub fn set_window(c: &mut Cpu) {
     if c.r[EAX] != 0 {
         return;
     }
-    let three_d = w == 0 || w == m.rd32(VIEW_3D);
+    let three_d = w == 0 || w == m.rd32(VIEW_3D) || COPIES.lock().unwrap().contains(&w);
     WINDOW_3D.store(three_d, Ordering::Relaxed);
     if three_d {
         BASE.store(m.rd32(SCALE_X), Ordering::Relaxed);
@@ -240,6 +265,7 @@ pub fn alloc_poly(c: &mut Cpu) {
 /// gl_RenderPoly_(eax primitive): the HUD's in the frame's 4:3 middle, the rest over all of it.
 pub fn render_poly(c: &mut Cpu) {
     let hud = HUD.with(|h| h.borrow().contains(&c.r[EAX]));
+    glide::set_3d(!hud);
     glide::set_view(if hud { glide::View::Hud(0.5) } else { glide::View::Full });
     call_original(c, RENDER_POLY);
 }

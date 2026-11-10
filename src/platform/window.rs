@@ -707,12 +707,12 @@ impl App {
     /// it). Keys and buttons going up, the focus and the close button still reach the game:
     /// nothing stays held.
     fn push(&mut self, i: Input) {
-        use super::menu::{Action, Menu, KEY};
+        use super::menu::{Action, Menu, KEY, KEY_FX};
         let full = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
         let Some(menu) = &mut self.menu else {
-            if matches!(i, Input::Key { vk: KEY, down: true, repeat: false, .. }) {
+            if let Input::Key { vk: key @ (KEY | KEY_FX), down: true, repeat: false, .. } = i {
                 let display = self.window.as_ref().and_then(|w| w.current_monitor()).map_or((1280, 960), |m| (m.size().width, m.size().height));
-                self.menu = Some(Menu::open(display, full));
+                self.menu = Some(Menu::open(key, display, full));
                 self.show_menu();
                 self.catch_cursor();
             } else {

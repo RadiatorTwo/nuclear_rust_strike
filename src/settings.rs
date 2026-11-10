@@ -40,11 +40,13 @@ pub struct Settings {
     pub texture_filter: u32,
     /// missions as wide as the window (Hor+), the HUD in the 4:3 middle
     pub widescreen: bool,
+    /// ambient occlusion: corners and the ground under things darker (`platform::ao`)
+    pub ambient_occlusion: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true }
     }
 }
 
@@ -96,6 +98,9 @@ pub fn get() -> Settings {
     }
     if let Some(v) = env("NSTRIKE_WIDESCREEN") {
         s.widescreen = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_SSAO") {
+        s.ambient_occlusion = v == "1";
     }
     s
 }
@@ -153,6 +158,7 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "msaa" => v.parse().ok().filter(|n| MSAA_CHOICES.contains(n)).map(|n| s.msaa = n),
             "texture_filter" => v.parse().ok().filter(|n| FILTER_CHOICES.contains(n)).map(|n| s.texture_filter = n),
             "widescreen" => v.parse().ok().map(|b| s.widescreen = b),
+            "ambient_occlusion" => v.parse().ok().map(|b| s.ambient_occlusion = b),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -206,13 +212,17 @@ pub fn render(s: &Settings) -> String {
          texture_filter = {}\n\
          \n\
          # Missions as wide as the window (the HUD stays in the 4:3 middle): true or false.\n\
-         widescreen = {}\n",
+         widescreen = {}\n\
+         \n\
+         # Ambient occlusion: corners and the ground under things get darker: true or false.\n\
+         ambient_occlusion = {}\n",
         s.fullscreen,
         s.vsync,
         list(MSAA_CHOICES),
         s.msaa,
         list(FILTER_CHOICES),
         s.texture_filter,
-        s.widescreen
+        s.widescreen,
+        s.ambient_occlusion
     )
 }

@@ -117,6 +117,24 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       game's Config menu is not extended, except for what it has already (the resolution)
 - [ ] Overlay menu: gamepad, more settings as they come (resolution scale)
 
+### 3a. Modern graphics effects (as future_rust_cop's 2a, one after another)
+- [x] Step 0, depth (2026-11-10, `ao.rs`): Glide vertices carry none (oow 1, ooz 0.1, painter's
+      order). vec3fp16_ProjectTerrainListASM_ 0x4b96c0 / ...ModelListASM_ 0x4b98c2 hooked:
+      out 8 bytes a point (sx, sy s16 in 1/8 pixel, z u16, on-screen byte); a table (sx, sy)
+      -> z, looked up per Glide vertex (x * 8): 89% of all vertices found (the rest HUD and
+      menus). Camera from the terrain projection's view: 24000 / 8 pixels per unit at 800x600,
+      centre 3200, 2400 (narrow, far: z ~11000-16000). Second attachment RG32F as in FCop;
+      `wide::render_poly` says 3D or HUD (`glide::set_3d`), the first HUD primitive of a frame
+      runs the passes. `NSTRIKE_GBUFFER=depth|ao`
+- [x] Step 1, SSAO (2026-11-10): FCop's passes, focal in x and y apart (widescreen), radius
+      500 units (a tree ~700), depth edges in units (0.5 radius), not relative to z (the
+      narrow camera's depth spread is small). Setting `ambient_occlusion` (default on),
+      F11 effects menu, `NSTRIKE_SSAO`; tuning `NSTRIKE_AO_RADIUS`, `NSTRIKE_AO_STRENGTH`.
+      Mission 1 at 1600x900: ~367 -> ~360 fps. Open: the user's look; other missions
+      Fixed: HUD off (passes at the swap) and cockpit HUD (Glide draw offset `[0x4ede5c]`)
+- [ ] Step 2, dynamic lights; 3, shadows; then particles, smoke, heat shimmer, bloom (FCop's
+      `lights.rs`, `shadows.rs`, `effects.rs`, `heat.rs`, `bloom.rs`)
+
 ### 4. Later
 - [x] Videos (`videos.res`)
 - [ ] Gamepads, Linux

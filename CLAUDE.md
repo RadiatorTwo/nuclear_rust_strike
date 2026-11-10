@@ -240,7 +240,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   Written 4 times as fast (`SPEED`, not a setting): in that thread (hooked, thread-local
   flag) `clock_` (0x4a5c7e, hooked) runs 4 times as fast and `Sleep` is 4 times shorter
   (kernel32 `sleep`). Mission 1's text: 8.4 s originally, 3.4 s at 3x.
-- `src/platform/menu.rs` (new): our menu, F10 (VK 0x79, not passed to the game). Drawn into
+- `src/platform/menu.rs` (new): our menu, F10 settings page, F11 effects page (VK 0x79 /
+  0x7a, not passed to the game; the other key turns the page). Drawn into
   the window's overlay (640x480 ARGB, over the picture's 4:3 middle; font `font.rs` from
   future_rust_cop). `window.rs` owns the `Menu` while open: `App::push` hands it all input
   (mouse moves converted to overlay pixels), the game gets only keys/buttons going up, focus
@@ -275,10 +276,24 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   placed and scaled by the screen's size already. HUDUserDraw_ draws the whole panel only when
   `[0x51f1b9]` says so, else the changing parts: when the Glide target is made anew (4:3,
   window size, MSAA) `wide::redraw` sets it for the next two HUD frames.
+  A message box (the Esc menu's, every frame) saves the window set with View_GetWindow_ (a
+  new copy), draws under window 0 and sets the copy back: copies of a 3D window count as 3D
+  (`COPIES`, View_GetWindow_/View_FreeWindow_ hooked; before, the 3D picture was stretched
+  4:3 from the first Esc on, 2026-11-10).
   The HUD places nothing from 3D positions; 3D sprites size by the x scale. Wide only while the HUD is drawn (else
   4:3). Setting `widescreen` (F10), `NSTRIKE_WIDE=<aspect>` forces one (0 off).
   `window::window_size` from other threads reads the size of the window's last drawing (it
   was 1280x960 there: the Glide target was always 960 high).
+- `src/platform/ao.rs` (new, as future_rust_cop's): depth for the modern effects and SSAO.
+  Glide vertices have no depth (oow 1, ooz 0.1): the two projections (0x4b96c0 terrain,
+  0x4b98c2 models; out 8 bytes a point: sx, sy in 1/8 pixel, z u16) are hooked and a table
+  (sx, sy) -> z gives each 3D vertex its z (89% found). `glide.rs` writes it into a second
+  attachment (RG32F) while `wide::render_poly` says 3D (`glide::set_3d`); the first HUD
+  primitive of a frame runs the passes, else the buffer swap (HUD off). The Glide layer adds
+  a draw offset `[0x4ede5c]`, `[0x4ede60]` (1/8 pixels) to the projected points: the lookup
+  takes it off (cockpit HUD modes: the 3D window's corner, (10, 10) at 800x600; without it
+  no vertex was found and the cockpit had no AO). Camera from the terrain projection's view (800x600:
+  3000 pixels per unit, narrow and far). F11 menu, `NSTRIKE_SSAO`, `NSTRIKE_GBUFFER=depth|ao`.
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.
