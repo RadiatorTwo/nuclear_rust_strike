@@ -294,6 +294,20 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   takes it off (cockpit HUD modes: the 3D window's corner, (10, 10) at 800x600; without it
   no vertex was found and the cockpit had no AO). Camera from the terrain projection's view (800x600:
   3000 pixels per unit, narrow and far). F11 menu, `NSTRIKE_SSAO`, `NSTRIKE_GBUFFER=depth|ao`.
+- `src/platform/lights.rs` (new, as future_rust_cop's): dynamic lights. The game's effects are
+  pyros (sequences from PYROS.PAK, global), all drawn by 0x430970 (hooked: sequence at pyro
+  +0x38); `wide::alloc_poly` notes per primitive who made it (pyro sequence, else
+  disp_AllocPoly_'s return address), `wide::render_poly` which is drawn. Additive 3D primitives
+  (blend 1,4) of the sequences in `LIGHT_PYROS` (0-7, 0x15: fire, explosions; not 0x18/0x19
+  smoke, 0x1d a boat's wake, 0x1e water spray: by colour they could not be told apart) become
+  lights: depth from the projected points, for sprites the nearest one within 32 px
+  (`ao::depth_near`); colour = local colour x texture rectangle mean (CPU copy `Texture::rgb`)
+  x alpha by the alpha combine (the glows' constant has alpha 0: function 6, texture alpha
+  minus local). Merged, 32 at most, applied after the AO (picture * (1 + 1.6 L) + 0.12 L).
+  The depth is made when AO or lights want it (`ao::depth_wanted`). Setting `dynamic_lights`
+  (F11, `NSTRIKE_LIGHTS`), `NSTRIKE_GBUFFER=lights`, `NSTRIKE_LIGHT_STRENGTH`/`_REACH`,
+  `NSTRIKE_LIGHT_PYROS` (hex list), `NSTRIKE_LIGHT_LOG=1` (glows by sequence). Fire keys in
+  the test script: Space, Q, E after flying forward (`46000:Up*3000 49500:Space*3000`).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

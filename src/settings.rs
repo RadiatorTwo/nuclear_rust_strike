@@ -42,11 +42,13 @@ pub struct Settings {
     pub widescreen: bool,
     /// ambient occlusion: corners and the ground under things darker (`platform::ao`)
     pub ambient_occlusion: bool,
+    /// dynamic lights: glows (muzzle flashes, explosions) light what is near them (`platform::lights`)
+    pub dynamic_lights: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true }
     }
 }
 
@@ -101,6 +103,9 @@ pub fn get() -> Settings {
     }
     if let Some(v) = env("NSTRIKE_SSAO") {
         s.ambient_occlusion = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_LIGHTS") {
+        s.dynamic_lights = v == "1";
     }
     s
 }
@@ -159,6 +164,7 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "texture_filter" => v.parse().ok().filter(|n| FILTER_CHOICES.contains(n)).map(|n| s.texture_filter = n),
             "widescreen" => v.parse().ok().map(|b| s.widescreen = b),
             "ambient_occlusion" => v.parse().ok().map(|b| s.ambient_occlusion = b),
+            "dynamic_lights" => v.parse().ok().map(|b| s.dynamic_lights = b),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -215,7 +221,10 @@ pub fn render(s: &Settings) -> String {
          widescreen = {}\n\
          \n\
          # Ambient occlusion: corners and the ground under things get darker: true or false.\n\
-         ambient_occlusion = {}\n",
+         ambient_occlusion = {}\n\
+         \n\
+         # Dynamic lights: muzzle flashes and explosions light what is near them: true or false.\n\
+         dynamic_lights = {}\n",
         s.fullscreen,
         s.vsync,
         list(MSAA_CHOICES),
@@ -223,6 +232,7 @@ pub fn render(s: &Settings) -> String {
         list(FILTER_CHOICES),
         s.texture_filter,
         s.widescreen,
-        s.ambient_occlusion
+        s.ambient_occlusion,
+        s.dynamic_lights
     )
 }

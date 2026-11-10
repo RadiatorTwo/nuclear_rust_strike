@@ -47,7 +47,13 @@ struct Frame {
     points: KeyMap<[u16; 2]>,
     found: Vec<[u16; 2]>,
     sure: Vec<u16>,
+    /// the points by cells of `CELL` (for `depth_near`), made at its first use in a picture
+    cells: KeyMap<Vec<(i16, i16, u16)>>,
+    cells_made: bool,
 }
+
+/// `depth_near`'s cells: 32 pixels (in 1/8 pixels).
+const CELL: i32 = 256;
 
 thread_local! {
     static FRAME: RefCell<Frame> = RefCell::new(Frame::default());
@@ -77,6 +83,17 @@ fn point(x: i16, y: i16, z: u16) {
 /// narrow camera far away).
 static CAMERA: Mutex<[f32; 4]> = Mutex::new([0.0; 4]);
 
+/// The camera in target pixels (`target` its size, `space` the game's resolution): focal (x, y)
+/// and centre (GL's, from below). None before a terrain was projected.
+pub fn camera(target: (u32, u32), space: (u32, u32)) -> Option<((f32, f32), (f32, f32))> {
+    let cam = *CAMERA.lock().unwrap();
+    if cam[0] <= 0.0 || cam[1] <= 0.0 {
+        return None;
+    }
+    let (kx, ky) = (target.0 as f32 / space.0 as f32, target.1 as f32 / space.1 as f32);
+    Some(((cam[0] * kx, cam[1] * ky), (cam[2] * kx, target.1 as f32 - cam[3] * ky)))
+}
+
 fn project(c: &mut Cpu, addr: u32) {
     let (out, n) = (c.r[EBX], arg(c, 0));
     let m = super::mem();
@@ -102,7 +119,41 @@ pub fn project_model(c: &mut Cpu) {
 
 /// At every picture shown: the next one projects anew.
 pub fn clear() {
-    FRAME.with_borrow_mut(|f| f.points.clear());
+    FRAME.with_borrow_mut(|f| {
+        f.points.clear();
+        f.cells_made = false;
+    });
+}
+
+/// The z of the projected point nearest to (x, y) (pixels of the game's resolution) within
+/// `reach` pixels (at most 32): for a glow, a sprite the game placed without projecting a
+/// point there.
+pub fn depth_near(x: f32, y: f32, reach: f32) -> Option<f32> {
+    let m = super::mem();
+    let (ox, oy) = (m.rd32(DRAW_OFFSET) as i32, m.rd32(DRAW_OFFSET + 4) as i32);
+    let (x, y) = (x * 8.0 - ox as f32, y * 8.0 - oy as f32);
+    let reach = (reach * 8.0).min(CELL as f32);
+    let cell = |x: f32, y: f32| key((x as i32).div_euclid(CELL) as i16, (y as i32).div_euclid(CELL) as i16);
+    FRAME.with_borrow_mut(|f| {
+        if !f.cells_made {
+            let Frame { points, cells, .. } = f;
+            cells.values_mut().for_each(Vec::clear);
+            for (&k, z) in points.iter() {
+                let (px, py) = (k as u16 as i16, (k >> 16) as u16 as i16);
+                cells.entry(cell(px as f32, py as f32)).or_default().push((px, py, z[0]));
+            }
+            f.cells_made = true;
+        }
+        let (cx, cy) = ((x as i32).div_euclid(CELL), (y as i32).div_euclid(CELL));
+        (cy - 1..=cy + 1)
+            .flat_map(|j| (cx - 1..=cx + 1).map(move |i| key(i as i16, j as i16)))
+            .filter_map(|c| f.cells.get(&c))
+            .flatten()
+            .map(|&(px, py, z)| ((px as f32 - x).hypot(py as f32 - y), z))
+            .filter(|&(d, _)| d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, z)| z as f32)
+    })
 }
 
 /// The z of a primitive's vertices (x, y in pixels of the game's resolution) into `out`, 0
@@ -111,7 +162,7 @@ pub fn depths(verts: impl ExactSizeIterator<Item = (f32, f32)>, out: &mut Vec<f3
     out.clear();
     let n = verts.len();
     FRAME.with_borrow_mut(|f| {
-        let Frame { points, found, sure } = f;
+        let Frame { points, found, sure, .. } = f;
         found.clear();
         // the renderer adds the draw offset (the 3D window's corner: (10, 10) pixels at 800x600
         // in the cockpit HUD modes) to the projected points
@@ -156,18 +207,24 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone.
-fn debug_view() -> i32 {
+/// The depth is made: for the AO or the dynamic lights.
+pub fn depth_wanted() -> bool {
+    enabled() || super::lights::enabled()
+}
+
+/// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone, 3 the lights alone.
+pub fn debug_view() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *V.get_or_init(|| match std::env::var("NSTRIKE_GBUFFER").as_deref() {
         Ok("depth") => 1,
         Ok("ao") => 2,
+        Ok("lights") => 3,
         _ => 0,
     })
 }
 
 /// A number from the environment, for tuning.
-fn tune(name: &str, default: f32) -> f32 {
+pub fn tune(name: &str, default: f32) -> f32 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
@@ -175,14 +232,14 @@ fn tune(name: &str, default: f32) -> f32 {
 const RADIUS: f32 = 500.0;
 const STRENGTH: f32 = 1.0;
 
-const VS: &str = r#"
+pub const VS: &str = r#"
 void main() {
     gl_Position = vec4(float((gl_VertexID & 1) * 4 - 1), float((gl_VertexID >> 1) * 4 - 1), 0.0, 1.0);
 }
 "#;
 
 /// Shared by the passes: the depth attachment (multisampled: sample 0) and view positions.
-const COMMON: &str = r#"
+pub const COMMON: &str = r#"
 #ifdef MS
 uniform sampler2DMS gdepth;
 #else
@@ -368,13 +425,7 @@ impl Ssao {
         let (w, h) = (target.0 as i32, target.1 as i32);
         let hs = ((w + 1) / 2, (h + 1) / 2);
         let half = self.half(gl, hs);
-        let cam = *CAMERA.lock().unwrap();
-        if cam[0] <= 0.0 || cam[1] <= 0.0 {
-            return;
-        }
-        // game pixels to target pixels
-        let (kx, ky) = (w as f32 / space.0 as f32, h as f32 / space.1 as f32);
-        let (focal, centre) = ((cam[0] * kx, cam[1] * ky), (cam[2] * kx, h as f32 - cam[3] * ky));
+        let Some((focal, centre)) = camera(target, space) else { return };
         let radius = tune("NSTRIKE_AO_RADIUS", RADIUS);
         let edge = 0.5 * radius;
         let v = ms as usize;

@@ -70,12 +70,13 @@ enum Row {
     Filter,
     Wide,
     Ao,
+    Lights,
     Close,
 }
 
 /// The settings page (F10) and the effects page (F11: the modern graphics effects).
 const SETTINGS: &[Row] = &[Row::Fullscreen, Row::Window, Row::FrameRate, Row::Vsync, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
-const EFFECTS: &[Row] = &[Row::Ao, Row::Close];
+const EFFECTS: &[Row] = &[Row::Ao, Row::Lights, Row::Close];
 
 pub struct Menu {
     /// the page's rows: `SETTINGS` or `EFFECTS`
@@ -139,6 +140,7 @@ impl Menu {
             }
             Row::Wide => (vec!["Off".into(), "On".into()], s.widescreen as usize),
             Row::Ao => (vec!["Off".into(), "On".into()], s.ambient_occlusion as usize),
+            Row::Lights => (vec!["Off".into(), "On".into()], s.dynamic_lights as usize),
             Row::Close => (Vec::new(), 0),
         }
     }
@@ -167,6 +169,7 @@ impl Menu {
             Row::Filter => super::glide::set_filtering(settings::FILTER_CHOICES[k]),
             Row::Wide => settings::update(|s| s.widescreen = k == 1),
             Row::Ao => super::ao::set_enabled(k == 1),
+            Row::Lights => super::lights::set_enabled(k == 1),
             Row::Close => {}
         }
         None
@@ -256,6 +259,7 @@ impl Menu {
                 Row::Filter => "Textures",
                 Row::Wide => "Widescreen",
                 Row::Ao => "Ambient occlusion",
+                Row::Lights => "Dynamic lights",
                 Row::Close => unreachable!(),
             };
             cv.label([rr[0] + 12, rr[1], rr[2], rr[3]], name, TEXT, 0, 2);
@@ -272,6 +276,7 @@ impl Menu {
             Row::Filter => "Filtering of textures the game filters",
             Row::Wide => "Missions as wide as the window, HUD in the middle",
             Row::Ao => "Corners and the ground under things darker",
+            Row::Lights => "Muzzle flashes and explosions light what is near",
             _ => "",
         };
         cv.label([p[0], p[3] - 46, p[2], p[3] - 30], note, TEXT_OFF, 1, 1);

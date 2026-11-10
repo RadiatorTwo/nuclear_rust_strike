@@ -132,8 +132,12 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       F11 effects menu, `NSTRIKE_SSAO`; tuning `NSTRIKE_AO_RADIUS`, `NSTRIKE_AO_STRENGTH`.
       Mission 1 at 1600x900: ~367 -> ~360 fps. Open: the user's look; other missions
       Fixed: HUD off (passes at the swap) and cockpit HUD (Glide draw offset `[0x4ede5c]`)
-- [ ] Step 2, dynamic lights; 3, shadows; then particles, smoke, heat shimmer, bloom (FCop's
-      `lights.rs`, `shadows.rs`, `effects.rs`, `heat.rs`, `bloom.rs`)
+- [x] Step 2, dynamic lights (2026-11-10, `lights.rs`): additive primitives of the game's fire
+      and explosion pyros (sequence by hooking the pyro drawer 0x430970; colour could not tell
+      a boat's wake from fire) light their surroundings after the AO. Setting `dynamic_lights`
+      (F11). Open: strength and reach by the user's look, other missions' sequences
+- [ ] Step 3, shadows; then particles, smoke, heat shimmer, bloom (FCop's `shadows.rs`,
+      `effects.rs`, `heat.rs`, `bloom.rs`; the pyro sequences tell the effects apart)
 
 ### 4. Later
 - [x] Videos (`videos.res`)

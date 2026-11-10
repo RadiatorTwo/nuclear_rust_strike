@@ -8,6 +8,7 @@
 
 pub mod advapi32;
 pub mod ao;
+pub mod lights;
 pub mod ddraw;
 pub mod dinput;
 pub mod dsound;
@@ -896,6 +897,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (wide::ALLOC_POLY, wide::alloc_poly),
     (wide::RENDER_POLY, wide::render_poly),
     (ao::PROJECT_TERRAIN, ao::project_terrain),
+    (lights::PYRO_DRAW, lights::pyro_draw),
     (ao::PROJECT_MODEL, ao::project_model),
 ];
 
@@ -927,6 +929,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     }
     glide::init();
     ao::init();
+    lights::init();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
     m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);

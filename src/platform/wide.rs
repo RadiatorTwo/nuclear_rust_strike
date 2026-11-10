@@ -255,8 +255,10 @@ pub fn hud(on: bool) {
 
 /// disp_AllocPoly_(eax ordering table set, dl type) -> eax primitive.
 pub fn alloc_poly(c: &mut Cpu) {
+    let ret = mem().rd32(c.r[crate::rt::ESP]);
     call_original(c, ALLOC_POLY);
     let p = c.r[EAX];
+    super::lights::made(p, ret);
     if p != 0 && (IN_HUD.with(|h| h.get()) || !WINDOW_3D.load(Ordering::Relaxed)) {
         HUD.with(|h| h.borrow_mut().insert(p));
     }
@@ -265,6 +267,7 @@ pub fn alloc_poly(c: &mut Cpu) {
 /// gl_RenderPoly_(eax primitive): the HUD's in the frame's 4:3 middle, the rest over all of it.
 pub fn render_poly(c: &mut Cpu) {
     let hud = HUD.with(|h| h.borrow().contains(&c.r[EAX]));
+    super::lights::drawing(c.r[EAX]);
     glide::set_3d(!hud);
     glide::set_view(if hud { glide::View::Hud(0.5) } else { glide::View::Full });
     call_original(c, RENDER_POLY);

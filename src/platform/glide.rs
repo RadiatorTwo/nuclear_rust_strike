@@ -74,6 +74,53 @@ struct Texture {
     /// palette changes (`dirty`)
     raw: Option<Vec<u8>>,
     dirty: bool,
+    /// its top level's texels as rgb (black: keyed out) for the glows' colours (`lights.rs`),
+    /// and the mean colours of rectangles asked for
+    rgb: Vec<u8>,
+    means: HashMap<[u32; 4], [f32; 3]>,
+}
+
+impl Texture {
+    /// The mean colour of a texture rectangle (in texels; keyed out ones count as black), from
+    /// 6x6 texels spread over it.
+    fn average(&mut self, st: [f32; 4]) -> [f32; 3] {
+        let key = st.map(f32::to_bits);
+        if let Some(&m) = self.means.get(&key) {
+            return m;
+        }
+        const N: u32 = 6;
+        let mut sum = [0u32; 3];
+        for j in 0..N {
+            for i in 0..N {
+                let s = st[0] + (st[2] - st[0]) * (i as f32 + 0.5) / N as f32;
+                let t = st[1] + (st[3] - st[1]) * (j as f32 + 0.5) / N as f32;
+                let x = (s.floor() as i64).rem_euclid(self.w as i64) as usize;
+                let y = (t.floor() as i64).rem_euclid(self.h as i64) as usize;
+                let p = 3 * (y * self.w as usize + x);
+                for c in 0..3 {
+                    sum[c] += self.rgb[p + c] as u32;
+                }
+            }
+        }
+        let m = sum.map(|v| v as f32 / (N * N) as f32 / 255.0);
+        // rectangles of a texture are few; bounded all the same
+        if self.means.len() >= 4096 {
+            self.means.clear();
+        }
+        self.means.insert(key, m);
+        m
+    }
+
+    /// RGBA texels (`convert`'s) of rows from `r0` into `rgb`.
+    fn keep_rgb(&mut self, r0: u32, px: &[u8]) {
+        let at = 3 * (r0 * self.w) as usize;
+        for (k, p) in px.chunks(4).enumerate() {
+            if let Some(d) = self.rgb.get_mut(at + 3 * k..at + 3 * k + 3) {
+                d.copy_from_slice(&p[..3]);
+            }
+        }
+        self.means.clear();
+    }
 }
 
 /// Palettised formats: P_8 and AP_88.
@@ -182,6 +229,9 @@ struct Glide {
     gbuf: bool,
     posted: bool,
     ssao: Option<super::ao::Ssao>,
+    /// dynamic lights (`lights.rs`): this picture's glows, and the pass
+    lights: Vec<super::lights::Light>,
+    lighting: Option<super::lights::Lighting>,
     /// `add`'s scratch: the vertices' depths
     zs: Vec<f32>,
 }
@@ -715,6 +765,8 @@ impl Glide {
                 gbuf: false,
                 posted: false,
                 ssao: None,
+                lights: Vec::new(),
+                lighting: None,
                 zs: Vec::new(),
             };
             g.size_buffers(gl);
@@ -895,10 +947,10 @@ impl Glide {
     /// when they changed), none when it is off.
     fn gbuffer(&mut self, gl: &glow::Context) {
         let samples = self.ms.map(|m| m.1);
-        if !super::ao::enabled() || self.gdepth.as_ref().is_some_and(|d| d.size != self.target || d.samples != samples) {
+        if !super::ao::depth_wanted() || self.gdepth.as_ref().is_some_and(|d| d.size != self.target || d.samples != samples) {
             self.drop_gbuffer(gl);
         }
-        if !super::ao::enabled() || self.gdepth.is_some() {
+        if !super::ao::depth_wanted() || self.gdepth.is_some() {
             return;
         }
         let (w, h) = (self.target.0 as i32, self.target.1 as i32);
@@ -1003,16 +1055,23 @@ impl Glide {
         }))
     }
 
-    /// The 3D picture is drawn (the HUD comes next): the ambient occlusion over it.
+    /// The 3D picture is drawn (the HUD comes next): the ambient occlusion over it, then the
+    /// dynamic lights.
     fn post_3d(&mut self, gl: &glow::Context) {
         self.flush(gl);
         self.gbuf = false;
         self.posted = true;
+        let lights = std::mem::take(&mut self.lights);
         let Some(out) = self.colour_fbo(gl) else { return };
         let d = self.gdepth.as_ref().unwrap();
         let (tex, ms) = (d.tex, d.samples.is_some());
         let (target, space) = (self.target, self.space);
-        self.ssao.get_or_insert_with(|| super::ao::Ssao::new(gl)).run(gl, tex, ms, target, space, out);
+        if super::ao::enabled() && super::ao::debug_view() != 3 {
+            self.ssao.get_or_insert_with(|| super::ao::Ssao::new(gl)).run(gl, tex, ms, target, space, out);
+        }
+        if let (true, Some(cam)) = (super::lights::enabled(), super::ao::camera(target, space)) {
+            self.lighting.get_or_insert_with(|| super::lights::Lighting::new(gl)).run(gl, tex, ms, target, cam, out, &lights);
+        }
     }
 
     /// The framebuffer drawn into.
@@ -1407,6 +1466,7 @@ impl Glide {
             let (s, t) = st(v);
             b = [b[0].min(s), b[1].min(t), b[2].max(s), b[3].max(t)];
         }
+        let st_box = b;
         let b = b.map(f32::to_bits);
         let xy = |v: u32| (f32::from_bits(m.rd32(v)), f32::from_bits(m.rd32(v + 4)));
         // a line: a quad as wide as the game's line at its resolution
@@ -1418,6 +1478,32 @@ impl Glide {
         } else {
             z.clear();
             z.resize(verts.len(), 0.0);
+        }
+        // a glow of the 3D picture (additive): a dynamic light (not lines)
+        if self.gbuf && self.gdepth.is_some() && super::lights::enabled() && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
+            && let Some(cam) = super::ao::camera(self.target, self.space)
+        {
+            let colour = self.glow_colour(verts, st_box);
+            if std::env::var_os("NSTRIKE_LIGHT_LOG").is_some() {
+                super::lights::log_source(colour);
+            }
+            // a sprite has no projected points: the nearest point's depth
+            if z.iter().all(|&d| d <= 0.0) {
+                let n = verts.len() as f32;
+                let (cx, cy) = verts.iter().fold((0.0, 0.0), |a, &v| (a.0 + xy(v).0 / n, a.1 + xy(v).1 / n));
+                if let Some(d) = super::ao::depth_near(cx, cy, 32.0) {
+                    z.iter_mut().for_each(|z| *z = d);
+                }
+            }
+            let (kx, ky) = (self.target.0 as f32 / self.space.0 as f32, self.target.1 as f32 / self.space.1 as f32);
+            let th = self.target.1 as f32;
+            let corners: Vec<_> = verts.iter().map(|&v| (xy(v).0 * kx, th - xy(v).1 * ky)).collect();
+            // only the game's fire and explosions (`lights::gives_light`)
+            if super::lights::gives_light()
+                && let Some(l) = super::lights::light(&corners, &z, colour, cam)
+            {
+                self.lights.push(l);
+            }
         }
         let mut put = |v: u32, (x, y): (f32, f32), z: f32| {
             let (s, t) = st(v);
@@ -1440,6 +1526,44 @@ impl Glide {
             }
         }
         self.zs = z;
+    }
+
+    /// A glow's colour: the local colour (the vertices' mean or the constant, by grColorCombine)
+    /// times the mean of its texture rectangle `st` (when the combine takes the texture), times
+    /// its alpha.
+    fn glow_colour(&mut self, verts: &[u32], st: [f32; 4]) -> [f32; 3] {
+        let m = mem();
+        let n = verts.len().max(1) as f32;
+        let avg = |o: u32| verts.iter().map(|&v| f32::from_bits(m.rd32(v + o))).sum::<f32>() / n / 255.0;
+        let k = self.constant;
+        let konst = |sh: u32| (k >> sh & 0xff) as f32 / 255.0;
+        let local = if self.cc[2] == 0 { [avg(0xc), avg(0x10), avg(0x14)] } else { [konst(16), konst(8), konst(0)] };
+        // grAlphaCombine (its factor taken as 1): local iterated or constant, "other" iterated,
+        // the texture (taken as 1: keyed-out texels already count black) or constant
+        let local_a = if self.ac[2] == 0 { avg(0x1c) } else { konst(24) };
+        let other_a = match self.ac[3] {
+            0 => avg(0x1c),
+            1 => 1.0,
+            _ => konst(24),
+        };
+        let alpha = match (self.state.blend.0, self.ac[0]) {
+            (4, _) => 1.0,
+            (_, 0) => 0.0,
+            (_, 1 | 2) => local_a,
+            (_, 3) => other_a,
+            (_, 4 | 5) => other_a + local_a,
+            (_, 6) => other_a - local_a,
+            _ => other_a,
+        }
+        .clamp(0.0, 1.0);
+        // grColorCombine: function 1 is the local colour alone; "other" 1 the texture
+        let c = if self.cc[0] != 1 && self.cc[3] == 1 {
+            let t = self.tex.and_then(|a| self.textures.get_mut(&a)).map_or([1.0; 3], |t| t.average(st));
+            if self.cc[1] == 8 { t } else { [t[0] * local[0], t[1] * local[1], t[2] * local[2]] }
+        } else {
+            local
+        };
+        c.map(|c| (c * alpha).clamp(0.0, 1.0))
     }
 
     /// The corners of a line from `a` to `b` (in the vertices' space) drawn as a quad: a pixel
@@ -1484,7 +1608,7 @@ impl Glide {
                     self.textures.remove(&a);
                     l
                 });
-                self.textures.insert(addr, Texture { layer, w, h, bytes, stamp, format, raw: None, dirty: false });
+                self.textures.insert(addr, Texture { layer, w, h, bytes, stamp, format, raw: None, dirty: false, rgb: vec![0; (w * h * 3) as usize], means: HashMap::new() });
                 layer
             }
         };
@@ -1505,6 +1629,7 @@ impl Glide {
             t.raw = None;
         }
         let px = convert(format, &src, &self.palette);
+        t.keep_rgb(r0, &px);
         self.upload(gl, layer, w, r0, r1, &px);
     }
 
@@ -1518,6 +1643,7 @@ impl Glide {
         let (layer, w, h, format) = (t.layer, t.w, t.h, t.format);
         let Some(raw) = &t.raw else { return };
         let px = convert(format, raw, &self.palette);
+        t.keep_rgb(0, &px);
         self.flush(gl);
         self.upload(gl, layer, w, 0, h - 1, &px);
     }
@@ -1646,6 +1772,9 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         g.drop_gbuffer(gl);
         if let Some(mut s) = g.ssao.take() {
             s.delete(gl);
+        }
+        if let Some(mut l) = g.lighting.take() {
+            l.delete(gl);
         }
         // this thread's own objects (other threads' cannot be deleted here)
         if let Some(l) = g.locals.remove(&std::thread::current().id()) {
