@@ -168,7 +168,10 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   game thread, our Rust ~40%, GL driver calls ~26%. Fixed then (~179 -> ~193 fps): the glFlush
   above; the per-primitive tags (who made it, ring, object, HUD) one map `wide::TAGS` (four
   SipHash sets/maps before); `ao` inserts a projection's points under one borrow and
-  `depth_near` searches a flat grid. Open: `pictures` snapshot (~8%), `_bezBezierParameterize`
+  `depth_near` searches a flat grid. Then (~190 -> ~198 fps): `pictures::ranges_read` copied
+  the terrain's ~54 KB byte by byte through a flat_map iterator, and the 625 KB static data
+  buffer of a picture is reused (`KEPT`: a new one each time came fresh from the system);
+  pictures' own work ~8% -> ~2%. Open: `_bezBezierParameterize`
   6%, 0x475314 / 0x475a34 (~8.5%), GL uploads (shadow casters, `Glide::copy`). Our own code
   symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
   dir) and `NSTRIKE_SAMPLE_RAW`.

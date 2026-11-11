@@ -277,8 +277,14 @@ fn write(a: u32, b: &[u8]) {
     mem().slice(a, b.len()).copy_from_slice(b);
 }
 
+/// The ranges' bytes one after another (copied a range at a time: collected byte by byte
+/// through an iterator, the terrain's ~54 KB took ~4% of the game thread).
 fn ranges_read(rs: &[(u32, u32)]) -> Vec<u8> {
-    rs.iter().flat_map(|&(a, b)| read(a, (b - a) as usize)).collect()
+    let mut v = Vec::with_capacity(rs.iter().map(|&(a, b)| (b - a) as usize).sum());
+    for &(a, b) in rs {
+        v.extend_from_slice(mem().slice(a, (b - a) as usize));
+    }
+    v
 }
 
 fn ranges_write(rs: &[(u32, u32)], mut b: &[u8]) {
@@ -618,7 +624,14 @@ pub fn picture(c: &mut Cpu) {
     let t1 = std::time::Instant::now();
     // from here on the turn is held: what changes in the static data is the picture's
     super::wide::apply();
-    let kept = read(STATICS.0, (STATICS.1 - STATICS.0) as usize);
+    // kept in one buffer for all pictures (a new one of 625 KB each time came fresh from the
+    // system: page faults and system calls)
+    thread_local! {
+        static KEPT: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let mut kept = KEPT.take();
+    kept.clear();
+    kept.extend_from_slice(mem().slice(STATICS.0, (STATICS.1 - STATICS.0) as usize));
     state().in_picture = true;
     // no other thread may run until it is put back (the audio timer's changes were lost)
     super::hold_turn(true);
@@ -646,12 +659,12 @@ pub fn picture(c: &mut Cpu) {
     call(c, DRAW_OT, [m.rd32(OT), 1, 0, 0]);
     m.wr16(0x522f34, 0);
     call(c, AFTER_OT, [0; 4]);
-    let mut kept = kept;
     for (lo, hi) in STATICS_LEFT {
         let at = (lo - STATICS.0) as usize;
         kept[at..at + (hi - lo) as usize].copy_from_slice(mem().slice(lo, (hi - lo) as usize));
     }
     write(STATICS.0, &kept);
+    KEPT.set(kept);
     super::hold_turn(false);
     timing(t1 - t0, t1.elapsed());
     state().in_picture = false;
