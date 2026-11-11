@@ -20,6 +20,9 @@ images are git-ignored.
 - Confirm before anything outward-facing or destructive (pushing, deleting).
 - Prefers clean Rust over generated C; performance comes later.
 - Never add Co-Authored-By or other AI attribution to commits.
+- The game's functions that produce faults may be replaced by new code (recomp_kit rule):
+  no complex work-arounds to keep a faulty original.
+- The user tests; on "commit und push" do it at once. Keep own test runs to a minimum.
 
 ## Relation to future_rust_cop
 
@@ -350,6 +353,19 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   (menus, loading pictures and the cockpit panel stay over frames: the glow piled up, white). Setting `bloom` (F11, `NSTRIKE_BLOOM`),
   `NSTRIKE_GBUFFER=bloom` (debug view 5: the AO and lights passes draw as usual under it),
   tuning `NSTRIKE_BLOOM_STRENGTH`, `NSTRIKE_BLOOM_THRESHOLD`.
+- `src/platform/heat.rs` (new, future_rust_cop's): heat shimmer after the lights, before the
+  bloom. Sources from `glide`'s `add` where the lights' are (`lights::gives_light`, also with
+  the lights off), size capped at `MAX_SIZE` 1200 units; the picture copied and read a few
+  pixels off near them (waves rising), not where the pixel's geometry is in front of the
+  source. Setting `heat_shimmer` (F11, `NSTRIKE_HEAT`), `NSTRIKE_HEAT_AMPLITUDE`.
+- `src/platform/zbuffer.rs` (new): a depth buffer for the 3D picture (the game's ordering
+  table sorts with mistakes: triangles behind others came out in front). A DEPTH_COMPONENT32F
+  renderbuffer in `Gdepth` beside the depth attachment (same samples, attached and cleared
+  with it). The vertex shader writes 1 - 100 / z; `glide`'s `add` gives corners without depth
+  the mean of the others (`zbuffer::fill`, at least half known) and splits batches by
+  `batch_z`; `flush` tests LEQUAL, writes for gmode 1 only, the others drawn nearer by `BIAS`
+  (0.4%). Without depth (HUD, menus, sprites): the game's order. Setting `depth_buffer` (F11,
+  `NSTRIKE_ZBUFFER`).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

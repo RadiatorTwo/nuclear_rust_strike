@@ -80,11 +80,15 @@ pub struct Settings {
     pub shadow_quality: ShadowQuality,
     /// a soft glow around bright things (`platform::bloom`)
     pub bloom: bool,
+    /// the picture wavers above fire and explosions (`platform::heat`)
+    pub heat_shimmer: bool,
+    /// a depth buffer for the 3D picture: no triangles in front that lie behind (`platform::zbuffer`)
+    pub depth_buffer: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid, bloom: true }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid, bloom: true, heat_shimmer: true, depth_buffer: true }
     }
 }
 
@@ -145,6 +149,12 @@ pub fn get() -> Settings {
     }
     if let Some(v) = env("NSTRIKE_SHADOWS") {
         s.shadows = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_ZBUFFER") {
+        s.depth_buffer = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_HEAT") {
+        s.heat_shimmer = v == "1";
     }
     if let Some(v) = env("NSTRIKE_BLOOM") {
         s.bloom = v == "1";
@@ -213,6 +223,8 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "shadows" => v.parse().ok().map(|b| s.shadows = b),
             "shadow_quality" => ShadowQuality::parse(v).map(|q| s.shadow_quality = q),
             "bloom" => v.parse().ok().map(|b| s.bloom = b),
+            "heat_shimmer" => v.parse().ok().map(|b| s.heat_shimmer = b),
+            "depth_buffer" => v.parse().ok().map(|b| s.depth_buffer = b),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -282,7 +294,14 @@ pub fn render(s: &Settings) -> String {
          shadow_quality = \"{}\"\n\
          \n\
          # Bloom: a soft glow around bright things (fire, explosions): true or false.\n\
-         bloom = {}\n",
+         bloom = {}\n\
+         \n\
+         # Heat shimmer: the air wavers above fire and explosions: true or false.\n\
+         heat_shimmer = {}\n\
+         \n\
+         # Depth buffer: no triangles drawn in front of nearer ones (the game sorts by itself,\n\
+         # with mistakes): true or false.\n\
+         depth_buffer = {}\n",
         s.fullscreen,
         s.vsync,
         list(MSAA_CHOICES),
@@ -294,6 +313,8 @@ pub fn render(s: &Settings) -> String {
         s.dynamic_lights,
         s.shadows,
         s.shadow_quality.name(),
-        s.bloom
+        s.bloom,
+        s.heat_shimmer,
+        s.depth_buffer
     )
 }

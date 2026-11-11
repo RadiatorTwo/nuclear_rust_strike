@@ -225,9 +225,9 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The depth is made: for the AO, the dynamic lights, the shadows or the bloom (its mask).
+/// The depth is made: for the AO, the dynamic lights, the shadows, the heat shimmer, the bloom (its mask) or the depth buffer.
 pub fn depth_wanted() -> bool {
-    enabled() || super::lights::enabled() || super::shadows::enabled() || super::bloom::enabled()
+    enabled() || super::lights::enabled() || super::shadows::enabled() || super::bloom::enabled() || super::heat::enabled() || super::zbuffer::enabled()
 }
 
 /// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone, 3 the lights alone, 4 the

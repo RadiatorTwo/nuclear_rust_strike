@@ -143,8 +143,13 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [x] Step 4, bloom (2026-11-11, `bloom.rs`, FCop's): the bright part of the 3D picture
       (threshold lower where the mask says additive), a chain of 6 levels down and up, added
       before the HUD. Setting `bloom` (F11). Mission 1: no measurable cost (~180 fps either way)
-- [ ] Next: particles, smoke, heat shimmer (FCop's `effects.rs`, `heat.rs`; the pyro
-      sequences tell the effects apart)
+- [x] Step 5, heat shimmer (2026-11-11, `heat.rs`, FCop's): the lights' sources (fire and
+      explosion pyros) with a depth; the picture read a few pixels off near them, rising, not
+      where something is in front. Setting `heat_shimmer` (F11). Open: the user's look
+- [x] Depth buffer (2026-11-11, `zbuffer.rs`): the game's ordering table put single triangles
+      behind other geometry in front; 3D primitives with depth at their corners are tested
+      (solid ones write). Setting `depth_buffer` (F11). Open: the user's look (decals, sprites)
+- [ ] Next: particles, smoke (FCop's `effects.rs`; the pyro sequences tell the effects apart)
 
 ### 4. Later
 - [x] Videos (`videos.res`)

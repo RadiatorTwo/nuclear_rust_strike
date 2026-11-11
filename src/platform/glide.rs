@@ -214,6 +214,8 @@ struct Glide {
     /// the parts of `batch` (word offsets) that are such objects' primitives
     no_cast_parts: Vec<(usize, usize)>,
     batch_mode: u32,
+    /// the batch's primitives have a depth at every corner: depth-tested (`zbuffer.rs`)
+    batch_z: bool,
     gamma: f32,
     /// the texture palette (grTexDownloadTable): 0xAARRGGBB, its alpha unused
     palette: [u32; 256],
@@ -243,6 +245,9 @@ struct Glide {
     casters: Vec<u32>,
     shadow_map: Option<super::shadows::ShadowMap>,
     bloom: Option<super::bloom::Bloom>,
+    /// heat shimmer (`heat.rs`): this picture's sources, and the pass
+    heat_sources: Vec<super::heat::Source>,
+    heat: Option<super::heat::Heat>,
 
     /// `add`'s scratch: the vertices' depths
     zs: Vec<f32>,
@@ -253,6 +258,8 @@ struct Glide {
 /// through one: the depth is read meanwhile). All of the game's thread.
 struct Gdepth {
     tex: glow::Texture,
+    /// the depth buffer (`zbuffer.rs`), as many samples as the picture
+    zrb: glow::Renderbuffer,
     samples: Option<u32>,
     size: (u32, u32),
     attached: Vec<glow::Framebuffer>,
@@ -389,6 +396,8 @@ pub fn vertex_layout(gl: &glow::Context) {
 
 const VS: &str = r#"
 uniform vec2 space;
+uniform float zbias;
+const float ZNEAR = 100.0;
 layout(location = 0) in vec2 pos;
 layout(location = 1) in vec4 col;
 layout(location = 2) in vec2 tc;
@@ -409,7 +418,9 @@ void main() {
     vmode = mode;
     st = tc;
     vinvz = z > 0.0 ? 1.0 / z : 0.0;
-    gl_Position = vec4(pos.x / space.x * 2.0 - 1.0, 1.0 - pos.y / space.y * 2.0, 0.0, 1.0);
+    // the depth buffer: 1 - near / z (linear on the screen as 1 / z), pulled nearer by zbias
+    float d = z > 0.0 ? clamp(1.0 - ZNEAR / (z * (1.0 - zbias)), 0.0, 1.0) : 0.0;
+    gl_Position = vec4(pos.x / space.x * 2.0 - 1.0, 1.0 - pos.y / space.y * 2.0, d * 2.0 - 1.0, 1.0);
 }
 "#;
 
@@ -584,6 +595,7 @@ pub const VERTEX: usize = 21;
 /// The shaders' uniforms, looked up once.
 struct Uniforms {
     space: Option<glow::UniformLocation>,
+    zbias: Option<glow::UniformLocation>,
     tex: Option<glow::UniformLocation>,
     tex_a: Option<glow::UniformLocation>,
     mipmaps: Option<glow::UniformLocation>,
@@ -600,6 +612,7 @@ impl Uniforms {
         let u = |n: &str| unsafe { gl.get_uniform_location(prog, n) };
         Uniforms {
             space: u("space"),
+            zbias: u("zbias"),
             tex: u("tex"),
             tex_a: u("tex_a"),
             mipmaps: u("mipmaps"),
@@ -776,6 +789,7 @@ impl Glide {
                 no_cast: false,
                 no_cast_parts: Vec::new(),
                 batch_mode: glow::TRIANGLES,
+                batch_z: false,
                 gamma: 1.0,
                 palette,
                 front: texture(gl, true),
@@ -792,6 +806,8 @@ impl Glide {
                 casters: Vec::new(),
                 shadow_map: None,
                 bloom: None,
+                heat_sources: Vec::new(),
+                heat: None,
 
                 zs: Vec::new(),
             };
@@ -999,7 +1015,11 @@ impl Glide {
                 }
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RG32F as i32, w, h, 0, glow::RG, glow::FLOAT, glow::PixelUnpackData::Slice(None));
             }
-            self.gdepth = Some(Gdepth { tex, samples, size: self.target, attached: Vec::new(), colour: HashMap::new() });
+            let zrb = gl.create_renderbuffer().expect("GL renderbuffer");
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(zrb));
+            gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples.unwrap_or(0) as i32, glow::DEPTH_COMPONENT32F, w, h);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+            self.gdepth = Some(Gdepth { tex, zrb, samples, size: self.target, attached: Vec::new(), colour: HashMap::new() });
         }
     }
 
@@ -1014,10 +1034,12 @@ impl Glide {
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1, kind, Some(d.tex), 0);
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(d.zrb));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
             if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
                 log!("warn: no ambient occlusion (the depth attachment is not taken)");
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1, kind, None, 0);
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, None);
                 gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
                 super::ao::set_enabled(false);
                 return false;
@@ -1026,6 +1048,8 @@ impl Glide {
             gl.color_mask_draw_buffer(1, true, true, true, true);
             gl.clear_buffer_f32_slice(glow::COLOR, 1, &[0.0; 4]);
             gl.color_mask_draw_buffer(1, false, false, false, false);
+            gl.depth_mask(true);
+            gl.clear_buffer_f32_slice(glow::DEPTH, 0, &[1.0]);
         }
         d.attached.push(fbo);
         true
@@ -1040,9 +1064,11 @@ impl Glide {
             for f in d.attached.into_iter().filter(|f| live.contains(f)) {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(f));
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT1, kind, None, 0);
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, None);
                 gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
             }
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.delete_renderbuffer(d.zrb);
             for f in d.colour.into_values() {
                 gl.delete_framebuffer(f);
             }
@@ -1065,6 +1091,8 @@ impl Glide {
             gl.color_mask_draw_buffer(1, true, true, true, true);
             gl.clear_buffer_f32_slice(glow::COLOR, 1, &[0.0; 4]);
             gl.color_mask_draw_buffer(1, false, false, false, false);
+            gl.depth_mask(true);
+            gl.clear_buffer_f32_slice(glow::DEPTH, 0, &[1.0]);
         }
     }
 
@@ -1088,12 +1116,13 @@ impl Glide {
     }
 
     /// The 3D picture is drawn (the HUD comes next): the ambient occlusion over it, then the
-    /// dynamic lights, the bloom.
+    /// dynamic lights, the heat shimmer, the bloom.
     fn post_3d(&mut self, gl: &glow::Context) {
         self.flush(gl);
         self.gbuf = false;
         self.posted = true;
         let lights = std::mem::take(&mut self.lights);
+        let heat_sources = std::mem::take(&mut self.heat_sources);
         let Some(out) = self.colour_fbo(gl) else { return };
         let d = self.gdepth.as_ref().unwrap();
         let (tex, ms) = (d.tex, d.samples.is_some());
@@ -1116,6 +1145,10 @@ impl Glide {
         }
         if let (true, Some(cam)) = (super::lights::enabled(), super::ao::camera(target, map)) {
             self.lighting.get_or_insert_with(|| super::lights::Lighting::new(gl)).run(gl, tex, ms, target, cam, out, &lights);
+        }
+        if let (true, Some((focal, _))) = (super::heat::enabled(), super::ao::camera(target, map)) {
+            let clip = [0, 0, target.0 as i32, target.1 as i32];
+            self.heat.get_or_insert_with(|| super::heat::Heat::new(gl)).run(gl, tex, ms, target, out, clip, focal, &heat_sources);
         }
         if super::bloom::enabled() {
             let clip = [0, 0, target.0 as i32, target.1 as i32];
@@ -1448,6 +1481,15 @@ impl Glide {
                 false => 0,
             };
             gl.uniform_1_i32(u.gmode.as_ref(), gmode);
+            // the depth buffer: primitives with depth tested; solid ones write it, the others
+            // (blended, darkening) are drawn a little nearer (lying on the ground: no flicker)
+            let ztest = depth && self.batch_z && super::zbuffer::enabled();
+            if ztest {
+                gl.enable(glow::DEPTH_TEST);
+                gl.depth_func(glow::LEQUAL);
+                gl.depth_mask(gmode == 1);
+            }
+            gl.uniform_1_f32(u.zbias.as_ref(), if ztest && gmode != 1 { super::zbuffer::BIAS } else { 0.0 });
             // the sun's shadow casters: triangles with depth at every corner, the chroma key in
             // the constant colour's place (`shadows.rs`)
             if gmode == 1 && self.batch_mode == glow::TRIANGLES && super::shadows::enabled() {
@@ -1481,6 +1523,8 @@ impl Glide {
             let bytes = std::slice::from_raw_parts(self.batch.as_ptr() as *const u8, self.batch.len() * 4);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
             gl.draw_arrays(self.batch_mode, 0, (self.batch.len() / VERTEX) as i32);
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_mask(true);
             if depth {
                 gl.color_mask_draw_buffer(1, false, false, false, false);
             }
@@ -1551,7 +1595,7 @@ impl Glide {
             z.resize(verts.len(), 0.0);
         }
         // a glow of the 3D picture (additive): a dynamic light (not lines)
-        if self.gbuf && !self.cast_only && self.gdepth.is_some() && super::lights::enabled() && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
+        if self.gbuf && !self.cast_only && self.gdepth.is_some() && (super::lights::enabled() || super::heat::enabled()) && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
             && let Some(cam) = super::ao::camera(self.target, self.full_map())
         {
             let colour = self.glow_colour(verts, st_box);
@@ -1570,11 +1614,25 @@ impl Glide {
             let th = self.target.1 as f32;
             let corners: Vec<_> = verts.iter().map(|&v| (ox + xy(v).0 * kx, th - (oy + xy(v).1 * ky))).collect();
             // only the game's fire and explosions (`lights::gives_light`)
-            if super::lights::gives_light()
-                && let Some(l) = super::lights::light(&corners, &z, colour, cam)
-            {
-                self.lights.push(l);
+            if super::lights::gives_light() {
+                if super::lights::enabled()
+                    && let Some(l) = super::lights::light(&corners, &z, colour, cam)
+                {
+                    self.lights.push(l);
+                }
+                if super::heat::enabled()
+                    && let Some(s) = super::heat::source(&corners, &z, true, cam.0.1)
+                {
+                    self.heat_sources.push(s);
+                }
             }
+        }
+        // the depth buffer: corners without depth among ones with it take their mean; a batch
+        // holds primitives all with depth (tested) or all without (drawn in the game's order)
+        let has_z = super::zbuffer::enabled() && super::zbuffer::fill(&mut z);
+        if has_z != self.batch_z {
+            self.flush(gl);
+            self.batch_z = has_z;
         }
         let start = self.batch.len();
         let mut put = |v: u32, (x, y): (f32, f32), z: f32| {
@@ -1886,6 +1944,9 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         }
         if let Some(mut b) = g.bloom.take() {
             b.delete(gl);
+        }
+        if let Some(mut h) = g.heat.take() {
+            h.delete(gl);
         }
         // this thread's own objects (other threads' cannot be deleted here)
         if let Some(l) = g.locals.remove(&std::thread::current().id()) {
