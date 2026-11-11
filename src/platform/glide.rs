@@ -173,6 +173,10 @@ struct Glide {
     vbo: glow::Buffer,
     /// what each thread's context has of its own (see `Local`)
     locals: HashMap<std::thread::ThreadId, Local>,
+    /// the threads that drew, with `swaps` at their last call (`with`)
+    drawers: Vec<(std::thread::ThreadId, u64)>,
+    /// grBufferSwap calls so far
+    swaps: u64,
     /// every texture, 256x256 at most, in one array: rgb premultiplied by coverage and the
     /// coverage, with mipmaps (see the module)
     array: glow::Texture,
@@ -639,9 +643,25 @@ fn with<R>(f: impl FnOnce(&mut Glide, &glow::Context) -> R) -> Option<R> {
     let g = g.as_mut()?;
     super::window::with_gl(|gl| {
         let r = f(g, gl);
-        // with more than one thread drawing, the next may be another context: it sees this
-        // one's work once it is flushed
-        if g.locals.len() > 1 {
+        // while another thread draws too (within the last two pictures), the next call may be
+        // its context: it sees this one's work once it is flushed. (A thread's GL objects stay
+        // after it ends: the text before a mission made every call flush in it, 2026-11-11.)
+        let me = std::thread::current().id();
+        let swaps = g.swaps;
+        let mut other = false;
+        let mut known = false;
+        for d in g.drawers.iter_mut() {
+            if d.0 == me {
+                d.1 = swaps;
+                known = true;
+            } else if d.1 + 2 >= swaps {
+                other = true;
+            }
+        }
+        if !known {
+            g.drawers.push((me, swaps));
+        }
+        if other {
             unsafe { gl.flush() };
         }
         r
@@ -771,6 +791,8 @@ impl Glide {
                 prog,
                 vbo,
                 locals: HashMap::new(),
+                drawers: Vec::new(),
+                swaps: 0,
                 array,
                 alpha,
                 stale: textures.values().fold(0, |m, t| m | 1 << t.layer),
@@ -2019,6 +2041,7 @@ fn buffer_swap(c: &mut Cpu) -> u32 {
         if g.gbuf && !g.posted && g.gdepth.is_some() {
             g.post_3d(gl);
         }
+        g.swaps += 1;
         g.flush(gl);
         g.resolve(gl);
         g.clear_gbuffer(gl);

@@ -66,8 +66,7 @@ pub fn set_enabled(on: bool) {
 }
 
 thread_local! {
-    /// who made each primitive (disp_AllocPoly_'s return address), and the one drawn now
-    static MADE: std::cell::RefCell<std::collections::HashMap<u32, u32>> = Default::default();
+    /// who made the primitive drawn now
     static SOURCE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -85,17 +84,15 @@ pub fn pyro_draw(c: &mut crate::rt::Cpu) {
     PYRO.set(None);
 }
 
-/// disp_AllocPoly_ gave primitive `p` to the code at `ret` (a pyro's: its sequence | 1 << 31).
-pub fn made(p: u32, ret: u32) {
-    if p != 0 {
-        let tag = PYRO.get().map_or(ret, |s| s | 1 << 31);
-        MADE.with_borrow_mut(|m| m.insert(p, tag));
-    }
+/// disp_AllocPoly_ gives a primitive to the code at `ret`: who made it (a pyro's: its
+/// sequence | 1 << 31), kept with it by `wide::alloc_poly`.
+pub fn made(ret: u32) -> u32 {
+    PYRO.get().map_or(ret, |s| s | 1 << 31)
 }
 
-/// gl_RenderPoly_ draws primitive `p`.
-pub fn drawing(p: u32) {
-    SOURCE.set(MADE.with_borrow(|m| m.get(&p).copied().unwrap_or(0)));
+/// gl_RenderPoly_ draws a primitive made by `made` (0 unknown).
+pub fn drawing(made: u32) {
+    SOURCE.set(made);
 }
 
 /// Where the primitive drawn now was made (0 unknown).

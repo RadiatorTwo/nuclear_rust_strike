@@ -22,7 +22,7 @@ const DRAW_OFFSET: u32 = 0x4ede5c;
 
 /// A fast hash for the points' keys.
 #[derive(Default, Clone, Copy)]
-struct KeyHash(u64);
+pub struct KeyHash(u64);
 
 impl std::hash::Hasher for KeyHash {
     fn finish(&self) -> u64 {
@@ -38,7 +38,7 @@ impl std::hash::Hasher for KeyHash {
     }
 }
 
-type KeyMap<V> = HashMap<u32, V, std::hash::BuildHasherDefault<KeyHash>>;
+pub type KeyMap<V> = HashMap<u32, V, std::hash::BuildHasherDefault<KeyHash>>;
 
 /// This picture's projections. The projections and the renderer run on the game's thread.
 #[derive(Default)]
@@ -47,13 +47,24 @@ struct Frame {
     points: KeyMap<[u16; 2]>,
     found: Vec<[u16; 2]>,
     sure: Vec<u16>,
-    /// the points by cells of `CELL` (for `depth_near`), made at its first use in a picture
-    cells: KeyMap<Vec<(i16, i16, u16)>>,
+    /// the points by cells of `CELL` (for `depth_near`), made at its first use in a picture: a
+    /// grid of `GRID` x `GRID` cells from (-1, -1); cell k's points are
+    /// `cell_points[cell_start[k]..cell_start[k + 1]]`
+    cell_start: Vec<u32>,
+    cell_points: Vec<(i16, i16, u16)>,
     cells_made: bool,
 }
 
 /// `depth_near`'s cells: 32 pixels (in 1/8 pixels).
 const CELL: i32 = 256;
+/// Cells across and down: up to 2000 game pixels (points farther off the screen are left out).
+const GRID: i32 = 64;
+
+/// The grid cell of a point (1/8 pixels), if inside.
+fn grid_cell(x: i32, y: i32) -> Option<usize> {
+    let (i, j) = (x.div_euclid(CELL) + 1, y.div_euclid(CELL) + 1);
+    ((0..GRID).contains(&i) && (0..GRID).contains(&j)).then(|| (j * GRID + i) as usize)
+}
 
 thread_local! {
     static FRAME: RefCell<Frame> = RefCell::new(Frame::default());
@@ -63,18 +74,16 @@ fn key(x: i16, y: i16) -> u32 {
     x as u16 as u32 | (y as u16 as u32) << 16
 }
 
-fn point(x: i16, y: i16, z: u16) {
+fn point(points: &mut KeyMap<[u16; 2]>, x: i16, y: i16, z: u16) {
     if z == 0 {
         return;
     }
-    FRAME.with_borrow_mut(|f| {
-        let e = f.points.entry(key(x, y)).or_insert([0, 0]);
-        if e[0] == 0 || e[0] == z {
-            e[0] = z;
-        } else if e[1] == 0 {
-            e[1] = z;
-        }
-    });
+    let e = points.entry(key(x, y)).or_insert([0, 0]);
+    if e[0] == 0 || e[0] == z {
+        e[0] = z;
+    } else if e[1] == 0 {
+        e[1] = z;
+    }
 }
 
 /// The camera of the 3D picture (its terrain's projection): pixels (of the game's resolution)
@@ -121,10 +130,13 @@ fn project(c: &mut Cpu, addr: u32) {
         *SUN.lock().unwrap() = super::shadows::sun();
     }
     call_original(c, addr);
-    for k in 0..n.min(0x10000) {
-        let r = out + 8 * k;
-        point(m.rd16(r) as i16, m.rd16(r + 2) as i16, m.rd16(r + 4));
-    }
+    // one borrow for the whole list (one per point cost ~2% of the game thread)
+    FRAME.with_borrow_mut(|f| {
+        for k in 0..n.min(0x10000) {
+            let r = out + 8 * k;
+            point(&mut f.points, m.rd16(r) as i16, m.rd16(r + 2) as i16, m.rd16(r + 4));
+        }
+    });
 }
 
 pub fn project_terrain(c: &mut Cpu) {
@@ -151,26 +163,47 @@ pub fn depth_near(x: f32, y: f32, reach: f32) -> Option<f32> {
     let (ox, oy) = (m.rd32(DRAW_OFFSET) as i32, m.rd32(DRAW_OFFSET + 4) as i32);
     let (x, y) = (x * 8.0 - ox as f32, y * 8.0 - oy as f32);
     let reach = (reach * 8.0).min(CELL as f32);
-    let cell = |x: f32, y: f32| key((x as i32).div_euclid(CELL) as i16, (y as i32).div_euclid(CELL) as i16);
     FRAME.with_borrow_mut(|f| {
         if !f.cells_made {
-            let Frame { points, cells, .. } = f;
-            cells.values_mut().for_each(Vec::clear);
+            // the points sorted by cell (counting sort)
+            let Frame { points, cell_start, cell_points, .. } = f;
+            let cells = (GRID * GRID) as usize;
+            cell_start.clear();
+            cell_start.resize(cells + 1, 0);
+            let at = |k: u32| grid_cell(k as u16 as i16 as i32, (k >> 16) as u16 as i16 as i32);
+            for &k in points.keys() {
+                if let Some(c) = at(k) {
+                    cell_start[c + 1] += 1;
+                }
+            }
+            for c in 0..cells {
+                cell_start[c + 1] += cell_start[c];
+            }
+            cell_points.clear();
+            cell_points.resize(cell_start[cells] as usize, (0, 0, 0));
+            let mut next = cell_start.clone();
             for (&k, z) in points.iter() {
-                let (px, py) = (k as u16 as i16, (k >> 16) as u16 as i16);
-                cells.entry(cell(px as f32, py as f32)).or_default().push((px, py, z[0]));
+                if let Some(c) = at(k) {
+                    cell_points[next[c] as usize] = (k as u16 as i16, (k >> 16) as u16 as i16, z[0]);
+                    next[c] += 1;
+                }
             }
             f.cells_made = true;
         }
-        let (cx, cy) = ((x as i32).div_euclid(CELL), (y as i32).div_euclid(CELL));
-        (cy - 1..=cy + 1)
-            .flat_map(|j| (cx - 1..=cx + 1).map(move |i| key(i as i16, j as i16)))
-            .filter_map(|c| f.cells.get(&c))
-            .flatten()
-            .map(|&(px, py, z)| ((px as f32 - x).hypot(py as f32 - y), z))
-            .filter(|&(d, _)| d <= reach)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, z)| z as f32)
+        let (xi, yi) = (x as i32, y as i32);
+        let mut best: Option<(f32, u16)> = None;
+        for j in -1..=1 {
+            for i in -1..=1 {
+                let Some(c) = grid_cell(xi + i * CELL, yi + j * CELL) else { continue };
+                for &(px, py, z) in &f.cell_points[f.cell_start[c] as usize..f.cell_start[c + 1] as usize] {
+                    let d = (px as f32 - x).hypot(py as f32 - y);
+                    if d <= reach && best.is_none_or(|b| d < b.0) {
+                        best = Some((d, z));
+                    }
+                }
+            }
+        }
+        best.map(|(_, z)| z as f32)
     })
 }
 

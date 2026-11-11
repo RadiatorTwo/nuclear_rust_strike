@@ -164,6 +164,14 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - A test run into the first mission: `NSTRIKE_INPUT="500:focus 4000:Enter 7000:Enter
   10000:Enter 25000:Enter 30000:Enter 35000:Enter"` (key names are case-sensitive: `Enter`,
   `Up`, `Left`; unknown ones are logged), flying from ~45 s.
+- Profile 2026-11-11 (mission 1 flying, all effects, ~180 fps): guest code only ~30% of the
+  game thread, our Rust ~40%, GL driver calls ~26%. Fixed then (~179 -> ~193 fps): the glFlush
+  above; the per-primitive tags (who made it, ring, object, HUD) one map `wide::TAGS` (four
+  SipHash sets/maps before); `ao` inserts a projection's points under one borrow and
+  `depth_near` searches a flat grid. Open: `pictures` snapshot (~8%), `_bezBezierParameterize`
+  6%, 0x475314 / 0x475a34 (~8.5%), GL uploads (shadow casters, `Glide::copy`). Our own code
+  symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
+  dir) and `NSTRIKE_SAMPLE_RAW`.
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
   word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's
@@ -221,7 +229,10 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `show_texture` from there hands the texture over with a fence (`SHOW`). The game draws from
   two threads (the game's, and `trantext` for the text before and after a mission): Glide's
   state is global (`GLIDE` mutex); what contexts do not share (framebuffers, VAOs) is made
-  per thread (`Local`), and with two threads every call ends with glFlush (swaps and clears always do). The alpha
+  per thread (`Local`), and while another thread drew within the last two buffer swaps every call
+  ends with glFlush (swaps and clears always do; `drawers`. Before 2026-11-11 by the count of
+  `Local`s: the mission text's thread keeps its own after it ends, every call in a mission
+  flushed). The alpha
   test is a vertex attribute (the game changes it between almost all primitives: one draw
   each, 2026-11-08); a batch ends only at a change of blend, chroma key, filter, clamp, clip. The TMU's
   memory (texture arrays, textures, palette) outlives grSstWinClose (`KEPT`), as on the card.

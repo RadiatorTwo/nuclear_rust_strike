@@ -239,15 +239,29 @@ pub fn zoom_out(g: (f32, f32)) {
 }
 
 thread_local! {
-    /// The shadows' object ring is drawn (its primitives only cast: `CAST`)
+    /// The shadows' object ring is drawn (its primitives only cast: `Tag::cast`)
     static CASTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// the primitives made while it was
-    static CAST: std::cell::RefCell<std::collections::HashSet<u32>> = std::cell::RefCell::new(std::collections::HashSet::new());
     /// ObjMgr draws an object (outside the ring)
     static OBJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// the primitives made while it did: not shadow casters (the ring's drawing of the same
+    /// what is known of each primitive, by its address (`alloc_poly`); one map, looked up once
+    /// per primitive drawn (four hash sets and maps before: ~6% of the game thread)
+    static TAGS: std::cell::RefCell<super::ao::KeyMap<Tag>> = std::cell::RefCell::new(Default::default());
+    /// `hud` at the HUD's last start: tags of older HUD primitives are not the HUD's
+    static HUD_EPOCH: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+/// A primitive's tag.
+#[derive(Clone, Copy, Default)]
+struct Tag {
+    /// who made it (`lights::made`)
+    made: u32,
+    /// made by the shadows' ring: only casts
+    cast: bool,
+    /// made while ObjMgr drew an object: not a shadow caster (the ring's drawing of the same
     /// objects is, whole, also where the game leaves out what is off its screen)
-    static NO_CAST: std::cell::RefCell<std::collections::HashSet<u32>> = std::cell::RefCell::new(std::collections::HashSet::new());
+    no_cast: bool,
+    /// made by the HUD (or under another window) since the HUD began `hud` (0: not)
+    hud: u32,
 }
 
 /// ObjMgr's drawing of an object begins (`true`) or ends (`pictures::draw_obj`); the state
@@ -294,8 +308,6 @@ pub const RENDER_POLY: u32 = 0x47a44c;
 thread_local! {
     /// HUDUserDraw_ runs (its primitives are the HUD's)
     static IN_HUD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// the primitives made by the HUD (or under another window) since the HUD last began
-    static HUD: std::cell::RefCell<std::collections::HashSet<u32>> = std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 /// HUDUserDraw_ begins (`true`) or ends: once a mission frame. The HUD is drawn unstretched
@@ -306,7 +318,7 @@ pub fn hud(on: bool) {
             mem().wr8(DRAW_ALL, 1);
         }
         *SEEN.lock().unwrap() = Some(Instant::now());
-        HUD.with(|h| h.borrow_mut().clear());
+        HUD_EPOCH.set(HUD_EPOCH.get().wrapping_add(1).max(1));
         scale(1.0);
     } else {
         apply();
@@ -319,37 +331,23 @@ pub fn alloc_poly(c: &mut Cpu) {
     let ret = mem().rd32(c.r[crate::rt::ESP]);
     call_original(c, ALLOC_POLY);
     let p = c.r[EAX];
-    super::lights::made(p, ret);
-    // the ring's primitives; an address used again by another is no longer one
-    if p != 0 {
-        let casting = CASTING.with(|c| c.get());
-        let object = !casting && OBJECT.with(|c| c.get());
-        CAST.with(|s| {
-            if casting {
-                s.borrow_mut().insert(p);
-            } else {
-                s.borrow_mut().remove(&p);
-            }
-        });
-        NO_CAST.with(|s| {
-            if object {
-                s.borrow_mut().insert(p);
-            } else {
-                s.borrow_mut().remove(&p);
-            }
-        });
+    if p == 0 {
+        return;
     }
-    if p != 0 && (IN_HUD.with(|h| h.get()) || !WINDOW_3D.load(Ordering::Relaxed)) {
-        HUD.with(|h| h.borrow_mut().insert(p));
-    }
+    // an address used again by another primitive takes the new one's tag
+    let cast = CASTING.get();
+    let hud = IN_HUD.get() || !WINDOW_3D.load(Ordering::Relaxed);
+    let tag = Tag { made: super::lights::made(ret), cast, no_cast: !cast && OBJECT.get(), hud: if hud { HUD_EPOCH.get() } else { 0 } };
+    TAGS.with_borrow_mut(|t| t.insert(p, tag));
 }
 
 /// gl_RenderPoly_(eax primitive): the HUD's in the frame's 4:3 middle, the rest over all of it.
 pub fn render_poly(c: &mut Cpu) {
-    let hud = HUD.with(|h| h.borrow().contains(&c.r[EAX]));
-    super::lights::drawing(c.r[EAX]);
-    glide::set_cast_only(CAST.with(|s| s.borrow().contains(&c.r[EAX])));
-    glide::set_no_cast(super::shadows::ring() && NO_CAST.with(|s| s.borrow().contains(&c.r[EAX])));
+    let tag = TAGS.with_borrow(|t| t.get(&c.r[EAX]).copied().unwrap_or_default());
+    let hud = tag.hud != 0 && tag.hud == HUD_EPOCH.get();
+    super::lights::drawing(tag.made);
+    glide::set_cast_only(tag.cast);
+    glide::set_no_cast(super::shadows::ring() && tag.no_cast);
     glide::set_3d(!hud);
     glide::set_view(if hud { glide::View::Hud(0.5) } else { glide::View::Full });
     call_original(c, RENDER_POLY);
