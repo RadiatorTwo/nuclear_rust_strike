@@ -367,15 +367,16 @@ fn turn_take_as(polite: bool) {
     let me = t.next;
     t.next += 1;
     t.waiting.push(Waiter { prio: ctl.prio.load(Ordering::Relaxed), polite, ticket: me });
-    BEST.store(t.best(), Ordering::Relaxed);
+    BEST.store(t.best(), Ordering::SeqCst);
     while t.held || t.first() != Some(me) {
-        // the running thread hands over at its next loop head
-        rt::POLL.store(1, Ordering::Relaxed);
-        t = TURN.cv.wait(t).unwrap_or_else(|e| e.into_inner());
+        // the running thread hands over at its next loop head; it stops looking while its
+        // slice lasts (`turn_yield`), so the waiters ask again now and then
+        rt::POLL.store(1, Ordering::SeqCst);
+        t = TURN.cv.wait_timeout(t, SLICE / 2).unwrap_or_else(|e| e.into_inner()).0;
     }
     t.waiting.retain(|w| w.ticket != me);
     t.held = true;
-    BEST.store(t.best(), Ordering::Relaxed);
+    BEST.store(t.best(), Ordering::SeqCst);
     rt::POLL.store(!t.waiting.is_empty() as u32, Ordering::Relaxed);
     HELD.set(true);
     TAKEN.set(tsc());
@@ -398,6 +399,8 @@ fn turn_give() {
 /// none of our locks (on Windows it stops anywhere).
 pub struct GuestThread {
     suspend: Mutex<u32>,
+    /// the same count, read at loop heads without the lock
+    suspends: std::sync::atomic::AtomicU32,
     cv: Condvar,
     /// THREAD_PRIORITY_* (-15..15)
     pub prio: AtomicI32,
@@ -412,7 +415,7 @@ impl GuestThread {
     }
 
     fn suspended(&self) -> bool {
-        *lock(&self.suspend) > 0
+        self.suspends.load(Ordering::Relaxed) > 0
     }
 
     /// SuspendThread: the count before. The thread stops at its next loop head.
@@ -420,6 +423,7 @@ impl GuestThread {
         let mut n = lock(&self.suspend);
         let was = *n;
         *n += 1;
+        self.suspends.store(*n, Ordering::Relaxed);
         rt::POLL.store(1, Ordering::Relaxed);
         was
     }
@@ -430,6 +434,7 @@ impl GuestThread {
         let was = *n;
         if was > 0 {
             *n -= 1;
+            self.suspends.store(*n, Ordering::Relaxed);
             if *n == 0 {
                 self.cv.notify_all();
             }
@@ -451,7 +456,7 @@ static GUEST_THREADS: Mutex<BTreeMap<u32, std::sync::Arc<GuestThread>>> = Mutex:
 pub fn guest_thread(id: u32) -> std::sync::Arc<GuestThread> {
     lock(&GUEST_THREADS)
         .entry(id)
-        .or_insert_with(|| std::sync::Arc::new(GuestThread { suspend: Mutex::new(0), cv: Condvar::new(), prio: AtomicI32::new(0) }))
+        .or_insert_with(|| std::sync::Arc::new(GuestThread { suspend: Mutex::new(0), suspends: std::sync::atomic::AtomicU32::new(0), cv: Condvar::new(), prio: AtomicI32::new(0) }))
         .clone()
 }
 
@@ -532,11 +537,18 @@ pub fn hold_turn(on: bool) {
 /// spinning does not starve the others: Windows lifts starved threads after a few seconds).
 /// A suspended thread stops here.
 fn turn_yield() {
-    if !HELD.get() || HOLD.get() {
+    if !HELD.get() {
         return;
     }
-    let me = my_thread();
-    if me.suspended() {
+    if HOLD.get() {
+        // a picture between frames keeps the turn: loop heads stop calling here (the waiters
+        // ask again when their wait times out)
+        rt::POLL.store(0, Ordering::SeqCst);
+        return;
+    }
+    // (by reference: my_thread's Arc clone at every loop head cost too)
+    let (suspended, prio) = MY_THREAD.with(|me| (me.suspended(), me.prio.load(Ordering::Relaxed)));
+    if suspended {
         turn_give();
         turn_take();
         return;
@@ -548,12 +560,21 @@ fn turn_yield() {
         rt::POLL.store(!t.waiting.is_empty() as u32, Ordering::Relaxed);
         return;
     }
-    if best > me.prio.load(Ordering::Relaxed) {
+    if best > prio {
         turn_give();
         turn_take();
     } else if tsc().wrapping_sub(TAKEN.get()) >= slice_ticks() {
         turn_give();
         turn_take_as(true);
+    } else {
+        // only lower or equal priorities wait: loop heads stop calling here until a waiter
+        // asks again (its wait times out): each loop head called here while WinMain's thread
+        // waited (~3% of the game thread). Looked at again after clearing: a higher priority
+        // or a suspension that came meanwhile is not missed.
+        rt::POLL.store(0, Ordering::SeqCst);
+        if BEST.load(Ordering::SeqCst) > prio || MY_THREAD.with(|me| me.suspended()) {
+            rt::POLL.store(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -631,7 +652,13 @@ fn on_event(c: &mut Cpu, e: Event) {
     match e {
         Event::Foreign(a) if (THUNK_LO..THUNK_LO + 4 * THUNK_N).contains(&a) => {
             let k = ((a - THUNK_LO) / 4) as usize;
-            let (f, nargs, quick) = {
+            // this thread's copy of the thunks it called: THUNKS' lock at each of ~400 000
+            // calls a second was ~1.5% of the game thread (stubs and traced ones not kept)
+            thread_local! {
+                static KNOWN: std::cell::RefCell<Vec<Option<(ImpFn, i32, bool)>>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let known = KNOWN.with_borrow(|v| v.get(k).copied().flatten());
+            let (f, nargs, quick) = if let Some(e) = known { e } else {
                 let t = lock(&THUNKS);
                 let Some(th) = t.get(k) else { fatal(c, &format!("call to unused thunk {a:#x}")) };
                 if trace_api(&th.name) {
@@ -644,6 +671,14 @@ fn on_event(c: &mut Cpu, e: Event) {
                             if lock(&SEEN).insert(th.name.clone(), ()).is_none() {
                                 log!("warn: {} is not implemented (returns 0)", th.name);
                             }
+                        }
+                        if !th.stub && !trace_api(&th.name) {
+                            KNOWN.with_borrow_mut(|v| {
+                                if v.len() <= k {
+                                    v.resize(k + 1, None);
+                                }
+                                v[k] = Some((f, th.nargs, th.quick));
+                            });
                         }
                         (f, th.nargs, th.quick)
                     }

@@ -96,7 +96,9 @@ impl Memory {
         #[cfg(windows)]
         let base = unsafe {
             use windows_sys::Win32::System::Memory::{MEM_RESERVE, PAGE_NOACCESS, VirtualAlloc};
-            VirtualAlloc(std::ptr::null(), GUEST_SPAN, MEM_RESERVE, PAGE_NOACCESS) as *mut u8
+            const MEM_WRITE_WATCH: u32 = 0x20_0000;
+            // write watch: the pages a picture between frames wrote are put back (`written`)
+            VirtualAlloc(std::ptr::null(), GUEST_SPAN, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS) as *mut u8
         };
         #[cfg(unix)]
         let base = unsafe {
@@ -127,6 +129,29 @@ impl Memory {
         #[cfg(unix)]
         let ok = unsafe { libc::mprotect(p as _, n, libc::PROT_READ | libc::PROT_WRITE) == 0 };
         assert!(ok, "cannot map guest memory {lo:#x}..{hi:#x}");
+    }
+
+    /// The pages (guest addresses) written in [lo, hi) since the last call, None where the
+    /// system does not tell. The watch starts again.
+    pub fn written(&self, lo: u32, hi: u32) -> Option<Vec<u32>> {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Memory::GetWriteWatch;
+            const WRITE_WATCH_FLAG_RESET: u32 = 1;
+            let n = ((hi - lo) as usize).div_ceil(0x1000);
+            let mut pages = vec![std::ptr::null_mut(); n];
+            let (mut count, mut gran) = (n, 0u32);
+            let r = GetWriteWatch(WRITE_WATCH_FLAG_RESET, self.base.add(lo as usize) as _, (hi - lo) as usize, pages.as_mut_ptr(), &mut count, &mut gran);
+            if r != 0 || gran != 0x1000 {
+                return None;
+            }
+            Some(pages[..count].iter().map(|&p| (p as usize - self.base as usize) as u32).collect())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (lo, hi);
+            None
+        }
     }
 
     pub fn slice(&self, a: u32, n: usize) -> &mut [u8] {

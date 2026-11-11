@@ -275,7 +275,9 @@ fn stats() {
     *last = now;
     *n += 1;
     if now - *start >= Duration::from_secs(1) {
-        log!("fps {} (slowest frame {:.1} ms)", *n, worst.as_secs_f64() * 1000.0);
+        use super::glide::{DRAWS, PALETTES, SAME_ROWS, REFRESHES, UPLOADS, UPLOAD_TEXELS};
+        let t = |a: &std::sync::atomic::AtomicU32| a.swap(0, std::sync::atomic::Ordering::Relaxed);
+        log!("fps {} (slowest frame {:.1} ms), draws {}, uploads {} ({} texels), refreshes {}, palettes {}, rows unchanged {}", *n, worst.as_secs_f64() * 1000.0, t(&DRAWS), t(&UPLOADS), t(&UPLOAD_TEXELS), t(&REFRESHES), t(&PALETTES), t(&SAME_ROWS));
         *s = Some((now, now, 0, Duration::ZERO));
     }
 }

@@ -277,9 +277,19 @@ pub fn debug_view() -> i32 {
     })
 }
 
-/// A number from the environment, for tuning.
-pub fn tune(name: &str, default: f32) -> f32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+/// A number from the environment, for tuning (read once: some are asked per primitive).
+pub fn tune(name: &'static str, default: f32) -> f32 {
+    static READ: Mutex<Vec<(&str, Option<f32>)>> = Mutex::new(Vec::new());
+    let mut r = READ.lock().unwrap();
+    let v = match r.iter().find(|e| e.0 == name) {
+        Some(e) => e.1,
+        None => {
+            let v = std::env::var(name).ok().and_then(|v| v.parse().ok());
+            r.push((name, v));
+            v
+        }
+    };
+    v.unwrap_or(default)
 }
 
 /// The occlusion's reach in object units (a tree is ~700 high), and how strongly it darkens.

@@ -625,13 +625,30 @@ pub fn picture(c: &mut Cpu) {
     // from here on the turn is held: what changes in the static data is the picture's
     super::wide::apply();
     // kept in one buffer for all pictures (a new one of 625 KB each time came fresh from the
-    // system: page faults and system calls)
+    // system: page faults and system calls), brought up to date by the pages written since
+    // the last picture (copying all of it there and back was ~3% of the game thread)
     thread_local! {
         static KEPT: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let mut kept = KEPT.take();
-    kept.clear();
-    kept.extend_from_slice(mem().slice(STATICS.0, (STATICS.1 - STATICS.0) as usize));
+    let len = (STATICS.1 - STATICS.0) as usize;
+    match mem().written(STATICS.0, STATICS.1) {
+        Some(pages) if kept.len() == len => {
+            for p in pages {
+                let (a, b) = (p.max(STATICS.0), (p + 0x1000).min(STATICS.1));
+                let at = (a - STATICS.0) as usize;
+                kept[at..at + (b - a) as usize].copy_from_slice(mem().slice(a, (b - a) as usize));
+            }
+        }
+        w => {
+            if w.is_none() {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| super::log!("pictures: no write watch: the static data is copied whole"));
+            }
+            kept.clear();
+            kept.extend_from_slice(mem().slice(STATICS.0, len));
+        }
+    }
     state().in_picture = true;
     // no other thread may run until it is put back (the audio timer's changes were lost)
     super::hold_turn(true);
@@ -663,7 +680,18 @@ pub fn picture(c: &mut Cpu) {
         let at = (lo - STATICS.0) as usize;
         kept[at..at + (hi - lo) as usize].copy_from_slice(mem().slice(lo, (hi - lo) as usize));
     }
-    write(STATICS.0, &kept);
+    match mem().written(STATICS.0, STATICS.1) {
+        Some(pages) => {
+            for p in pages {
+                let (a, b) = (p.max(STATICS.0), (p + 0x1000).min(STATICS.1));
+                let at = (a - STATICS.0) as usize;
+                write(a, &kept[at..at + (b - a) as usize]);
+            }
+            // putting back writes too: the watch starts after it
+            let _ = mem().written(STATICS.0, STATICS.1);
+        }
+        None => write(STATICS.0, &kept),
+    }
     KEPT.set(kept);
     super::hold_turn(false);
     timing(t1 - t0, t1.elapsed());

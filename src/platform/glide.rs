@@ -78,6 +78,13 @@ struct Texture {
     /// and the mean colours of rectangles asked for
     rgb: Vec<u8>,
     means: HashMap<[u32; 4], [f32; 3]>,
+    /// its top level as uploaded (premultiplied rgba, alpha and cover), and the rows not yet
+    /// uploaded: the game downloads some textures a row at a time, ~30 000 rows a second in a
+    /// mission (one upload each was ~5% of the game thread); they go up together when the
+    /// texture is next drawn with (`Glide::commit`)
+    staged: Vec<u8>,
+    staged_alpha: Vec<u8>,
+    pending: Option<(u32, u32)>,
 }
 
 impl Texture {
@@ -120,6 +127,19 @@ impl Texture {
             }
         }
         self.means.clear();
+    }
+
+    /// RGBA texels of rows `r0..=r1` into the staged texels, to be uploaded at the next use.
+    fn stage(&mut self, r0: u32, r1: u32, px: &[u8]) {
+        let at = (r0 * self.w) as usize;
+        let (rgb, alpha) = (&mut self.staged[at * 4..], &mut self.staged_alpha[at * 2..]);
+        // premultiplied by coverage: a black texel is keyed out
+        for (k, p) in px.chunks_exact(4).enumerate() {
+            let covered = p[..3] != [0, 0, 0];
+            rgb[4 * k..4 * k + 4].copy_from_slice(&if covered { [p[0], p[1], p[2], 255] } else { [0; 4] });
+            alpha[2 * k..2 * k + 2].copy_from_slice(&if covered { [p[3], 0] } else { [0, p[3]] });
+        }
+        self.pending = Some(self.pending.map_or((r0, r1), |(a, b)| (a.min(r0), b.max(r1))));
     }
 }
 
@@ -638,6 +658,15 @@ impl Uniforms {
     }
 }
 
+/// The calling thread's id (thread::current() clones an Arc: at every Glide call ~1% of the
+/// game thread).
+fn thread_id() -> std::thread::ThreadId {
+    thread_local! {
+        static ME: std::thread::ThreadId = std::thread::current().id();
+    }
+    ME.with(|m| *m)
+}
+
 fn with<R>(f: impl FnOnce(&mut Glide, &glow::Context) -> R) -> Option<R> {
     let mut g = GLIDE.lock().unwrap_or_else(|e| e.into_inner());
     let g = g.as_mut()?;
@@ -646,7 +675,7 @@ fn with<R>(f: impl FnOnce(&mut Glide, &glow::Context) -> R) -> Option<R> {
         // while another thread draws too (within the last two pictures), the next call may be
         // its context: it sees this one's work once it is flushed. (A thread's GL objects stay
         // after it ends: the text before a mission made every call flush in it, 2026-11-11.)
-        let me = std::thread::current().id();
+        let me = thread_id();
         let swaps = g.swaps;
         let mut other = false;
         let mut known = false;
@@ -850,7 +879,7 @@ impl Glide {
     /// This thread's own GL objects.
     fn local(&mut self, gl: &glow::Context) -> &mut Local {
         let vbo = self.vbo;
-        self.locals.entry(std::thread::current().id()).or_insert_with(|| Local::new(gl, vbo))
+        self.locals.entry(thread_id()).or_insert_with(|| Local::new(gl, vbo))
     }
 
     /// This thread's framebuffer drawing into a texture.
@@ -1557,6 +1586,7 @@ impl Glide {
             let bytes = std::slice::from_raw_parts(self.batch.as_ptr() as *const u8, self.batch.len() * 4);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STREAM_DRAW);
             gl.draw_arrays(self.batch_mode, 0, (self.batch.len() / VERTEX) as i32);
+            DRAWS.fetch_add(1, Ordering::Relaxed);
             gl.disable(glow::DEPTH_TEST);
             gl.depth_mask(true);
             if depth {
@@ -1634,7 +1664,8 @@ impl Glide {
             && let Some(cam) = super::ao::camera(self.target, self.full_map())
         {
             let colour = self.glow_colour(verts, st_box);
-            if std::env::var_os("NSTRIKE_LIGHT_LOG").is_some() {
+            static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *LOG.get_or_init(|| std::env::var_os("NSTRIKE_LIGHT_LOG").is_some()) {
                 super::lights::log_source(colour);
             }
             // a sprite has no projected points: the nearest point's depth
@@ -1786,8 +1817,7 @@ impl Glide {
     }
 
     /// Texels into the texture at TMU address `addr` (rows `rows` of its top level, or all).
-    fn download(&mut self, gl: &glow::Context, addr: u32, lod: u32, aspect: u32, format: u32, data: u32, rows: Option<(u32, u32)>) {
-        self.flush(gl);
+    fn download(&mut self, addr: u32, lod: u32, aspect: u32, format: u32, data: u32, rows: Option<(u32, u32)>) {
         let (w, h) = lod_size(lod, aspect);
         let bytes = w * h * bytes_per_texel(format);
         if trace() {
@@ -1795,11 +1825,8 @@ impl Glide {
         }
         self.downloads += 1;
         let stamp = self.downloads;
-        let layer = match self.textures.get_mut(&addr) {
-            Some(t) if (t.w, t.h, t.bytes) == (w, h, bytes) => {
-                t.stamp = stamp;
-                t.layer
-            }
+        match self.textures.get_mut(&addr) {
+            Some(t) if (t.w, t.h, t.bytes) == (w, h, bytes) => t.stamp = stamp,
             _ => {
                 // what it overwrites in TMU memory is gone; then a free layer, or the one
                 // downloaded longest ago
@@ -1810,10 +1837,10 @@ impl Glide {
                     self.textures.remove(&a);
                     l
                 });
-                self.textures.insert(addr, Texture { layer, w, h, bytes, stamp, format, raw: None, dirty: false, rgb: vec![0; (w * h * 3) as usize], means: HashMap::new() });
-                layer
+                let n = (w * h) as usize;
+                self.textures.insert(addr, Texture { layer, w, h, bytes, stamp, format, raw: None, dirty: false, rgb: vec![0; n * 3], means: HashMap::new(), staged: vec![0; n * 4], staged_alpha: vec![0; n * 2], pending: None });
             }
-        };
+        }
         let (r0, r1) = rows.unwrap_or((0, h - 1));
         let r1 = r1.min(h - 1);
         if r0 > r1 {
@@ -1822,48 +1849,56 @@ impl Glide {
         let bpt = bytes_per_texel(format);
         let src = mem().slice(data, ((r1 - r0 + 1) * w * bpt) as usize).to_vec();
         let t = self.textures.get_mut(&addr).unwrap();
-        t.format = format;
         if palettised(format) {
-            let raw = t.raw.get_or_insert_with(|| vec![0; (w * h * bpt) as usize]);
             let at = (r0 * w * bpt) as usize;
+            // the same texels again (the game downloads a page whose rows it marked, each
+            // picture): nothing to convert
+            if t.format == format && t.raw.as_ref().is_some_and(|raw| raw[at..at + src.len()] == src[..]) {
+                SAME_ROWS.fetch_add(r1 - r0 + 1, Ordering::Relaxed);
+                return;
+            }
+            let raw = t.raw.get_or_insert_with(|| vec![0; (w * h * bpt) as usize]);
             raw[at..at + src.len()].copy_from_slice(&src);
         } else {
             t.raw = None;
         }
+        t.format = format;
         let px = convert(format, &src, &self.palette);
         t.keep_rgb(r0, &px);
-        self.upload(gl, layer, w, r0, r1, &px);
+        t.stage(r0, r1, &px);
     }
 
-    /// A palettised texture converted again with the current palette.
+    /// Before drawing with the texture at `addr`: a palettised one converted again with the
+    /// current palette, the rows downloaded since its last use uploaded (what was batched
+    /// before drawn first, with the old texels).
     fn refresh(&mut self, gl: &glow::Context, addr: u32) {
         let Some(t) = self.textures.get_mut(&addr) else { return };
-        if !t.dirty {
-            return;
+        if t.dirty {
+            t.dirty = false;
+            REFRESHES.fetch_add(1, Ordering::Relaxed);
+            if let Some(raw) = &t.raw {
+                let px = convert(t.format, raw, &self.palette);
+                t.keep_rgb(0, &px);
+                t.stage(0, t.h - 1, &px);
+            }
         }
-        t.dirty = false;
-        let (layer, w, h, format) = (t.layer, t.w, t.h, t.format);
-        let Some(raw) = &t.raw else { return };
-        let px = convert(format, raw, &self.palette);
-        t.keep_rgb(0, &px);
-        self.flush(gl);
-        self.upload(gl, layer, w, 0, h - 1, &px);
+        if t.pending.is_some() {
+            self.flush(gl);
+            self.commit(gl, addr);
+        }
     }
 
-    /// RGBA texels into rows `r0..=r1` of a layer.
-    fn upload(&mut self, gl: &glow::Context, layer: u32, w: u32, r0: u32, r1: u32, px: &[u8]) {
-        let n = ((r1 - r0 + 1) * w) as usize;
+    /// Upload a texture's pending rows into its layer.
+    fn commit(&mut self, gl: &glow::Context, addr: u32) {
+        let Some(t) = self.textures.get_mut(&addr) else { return };
+        let Some((r0, r1)) = t.pending.take() else { return };
+        let (w, layer) = (t.w as usize, t.layer);
+        UPLOADS.fetch_add(1, Ordering::Relaxed);
+        UPLOAD_TEXELS.fetch_add(((r1 - r0 + 1) as usize * w) as u32, Ordering::Relaxed);
+        let rows = r0 as usize * w..(r1 as usize + 1) * w;
         unsafe {
-            // premultiplied by coverage: a black texel is keyed out
-            let mut rgb = Vec::with_capacity(n * 4);
-            let mut alpha = Vec::with_capacity(n * 2);
-            for p in px.chunks(4) {
-                let covered = p[..3] != [0, 0, 0];
-                rgb.extend(if covered { [p[0], p[1], p[2], 255] } else { [0; 4] });
-                alpha.extend(if covered { [p[3], 0] } else { [0, p[3]] });
-            }
-            for (t, format, px) in [(self.array, glow::RGBA, &rgb), (self.alpha, glow::RG, &alpha)] {
-                gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(t));
+            for (tex, format, px) in [(self.array, glow::RGBA, &t.staged[rows.start * 4..rows.end * 4]), (self.alpha, glow::RG, &t.staged_alpha[rows.start * 2..rows.end * 2])] {
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(tex));
                 gl.tex_sub_image_3d(
                     glow::TEXTURE_2D_ARRAY,
                     0,
@@ -1878,8 +1913,8 @@ impl Glide {
                     glow::PixelUnpackData::Slice(Some(px)),
                 );
             }
-            self.stale |= 1 << layer;
         }
+        self.stale |= 1 << layer;
     }
 
     /// The mipmaps of the stale layers, each level filtered from the one above.
@@ -1988,7 +2023,7 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
             h.delete(gl);
         }
         // this thread's own objects (other threads' cannot be deleted here)
-        if let Some(l) = g.locals.remove(&std::thread::current().id()) {
+        if let Some(l) = g.locals.remove(&thread_id()) {
             l.delete(gl);
         }
         if let Some((rb, _)) = g.ms.take() {
@@ -2264,14 +2299,14 @@ fn tex_calc_mem_required(c: &mut Cpu) -> u32 {
 fn tex_download_mipmap(c: &mut Cpu) -> u32 {
     let (addr, info) = (arg(c, 1), tex_info(arg(c, 3)));
     let (_, large, aspect, format, data) = info;
-    with(|g, gl| g.download(gl, addr, large, aspect, format, data, None));
+    with(|g, _| g.download(addr, large, aspect, format, data, None));
     0
 }
 
 fn tex_download_mipmap_level(c: &mut Cpu) -> u32 {
     let (addr, this, large, aspect, format, data) = (arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 7));
     if this == large {
-        with(|g, gl| g.download(gl, addr, this, aspect, format, data, None));
+        with(|g, _| g.download(addr, this, aspect, format, data, None));
     }
     0
 }
@@ -2280,10 +2315,19 @@ fn tex_download_mipmap_level_partial(c: &mut Cpu) -> u32 {
     let (addr, this, large, aspect, format, data, r0, r1) = (arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 7), arg(c, 8), arg(c, 9));
     if this == large {
         // `data` points at the first row downloaded
-        with(|g, gl| g.download(gl, addr, this, aspect, format, data, Some((r0, r1))));
+        with(|g, _| g.download(addr, this, aspect, format, data, Some((r0, r1))));
     }
     0
 }
+
+/// Counts for `NSTRIKE_FPS`: uploads, their texels, palettised textures converted again,
+/// palette changes.
+pub static SAME_ROWS: AtomicU32 = AtomicU32::new(0);
+pub static DRAWS: AtomicU32 = AtomicU32::new(0);
+pub static UPLOADS: AtomicU32 = AtomicU32::new(0);
+pub static UPLOAD_TEXELS: AtomicU32 = AtomicU32::new(0);
+pub static REFRESHES: AtomicU32 = AtomicU32::new(0);
+pub static PALETTES: AtomicU32 = AtomicU32::new(0);
 
 /// Entries `first..=last` of a table (GrTexTable_t: NCC0 0, NCC1 1, PALETTE 2) from `data`,
 /// which holds the whole table.
@@ -2301,6 +2345,7 @@ fn download_table(kind: u32, data: u32, first: u32, last: u32) {
             g.palette[i as usize] = v;
         }
         if changed {
+            PALETTES.fetch_add(1, Ordering::Relaxed);
             for t in g.textures.values_mut().filter(|t| t.raw.is_some()) {
                 t.dirty = true;
             }

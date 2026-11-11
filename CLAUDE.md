@@ -171,8 +171,25 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   `depth_near` searches a flat grid. Then (~190 -> ~198 fps): `pictures::ranges_read` copied
   the terrain's ~54 KB byte by byte through a flat_map iterator, and the 625 KB static data
   buffer of a picture is reused (`KEPT`: a new one each time came fresh from the system);
-  pictures' own work ~8% -> ~2%. Open: `_bezBezierParameterize`
-  6%, 0x475314 / 0x475a34 (~8.5%), GL uploads (shadow casters, `Glide::copy`). Our own code
+  pictures' own work ~8% -> ~2%. Then (2026-11-11, ~175 -> ~205 fps, guest share 30% ->
+  37%): the game marks a texture page's rows (vramSetDirty_) and gl_TransferTextures_
+  downloads them a row at a time, every picture (~30 000 rows a second, the picture's
+  restore of the static data marks them again): rows equal to the kept raw texels are
+  skipped (~87%), the others staged (`Texture::stage`) and uploaded together when the texture
+  is next drawn with (`Glide::refresh` -> `commit`, a flush first); per-call costs: the
+  thread's id cached (`glide::thread_id`), the thunks per thread (`on_event`'s `KNOWN`, no
+  THUNKS lock), `turn_yield` without Arc clone and mutex; loop heads stop calling
+  `rt_yield` while the holder's slice lasts or a picture holds the turn (POLL cleared;
+  waiters wait with a timeout of SLICE/2 and set it again: 4.5 million calls a second ->
+  2000); `ao::tune` reads the environment once (it was read per smoke primitive); the
+  picture's static data is kept up to date and put back by the pages written (guest memory
+  reserved with MEM_WRITE_WATCH, `Memory::written`). `NSTRIKE_FPS` also logs draws, uploads
+  and unchanged rows a second. AVX: Cranelift already compiles the guest for the host's
+  features (`cranelift_native`); our Rust built with `target-cpu=x86-64-v3` was not faster
+  (A/B 2026-11-11). Samples of `_bezBezierParameterize` are the hooked terrain projection
+  0x4b96c0 after it (6%: a native version would be ~5%); 0x475314 / 0x475a34 (~9%) are
+  gl_RenderPoly_'s renderers of poly types 8 and 9. Left: GL driver ~20% (flush ~8%: data
+  2%, draw 2%, state), `Glide::add` with the depth lookup ~12%. Our own code
   symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
   dir) and `NSTRIKE_SAMPLE_RAW`.
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
