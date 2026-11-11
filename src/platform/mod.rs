@@ -56,6 +56,18 @@ const RET_MAGIC: u32 = 0x7ffe_0000;
 
 static MEM: OnceLock<Memory> = OnceLock::new();
 
+/// Reserve the guest memory, at `rt::FIXED_BASE` if it is free: done before the game is
+/// compiled (the code then takes the base as a constant, `lift::FIXED_BASE`), and early,
+/// before other allocations may take the place.
+pub fn reserve_memory() {
+    let m = MEM.get_or_init(Memory::reserve_fixed);
+    if m.base as usize == crate::rt::FIXED_BASE {
+        crate::lift::FIXED_BASE.store(m.base as u64, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        eprintln!("guest memory at {:#x}, not {:#x}: its base is read at run time", m.base as usize, crate::rt::FIXED_BASE);
+    }
+}
+
 /// Guest memory.
 pub fn mem() -> &'static Memory {
     MEM.get().expect("guest memory not set up")
@@ -939,6 +951,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (ao::PROJECT_TERRAIN, ao::project_terrain),
     (lights::PYRO_DRAW, lights::pyro_draw),
     (shadows::MODEL_FACE, shadows::model_face),
+    (shadows::RENDER_SHADOW, shadows::render_shadow),
     (ao::PROJECT_MODEL, ao::project_model),
 ];
 
@@ -957,7 +970,7 @@ fn selector_from_linear(c: &mut Cpu) {
 /// (which needs a large stack: guest calls nest on it). Returns the exit code.
 pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     let _ = GAME_DIR.set(game_dir);
-    let _ = MEM.set(Memory::reserve());
+    reserve_memory();
     let m = mem();
     m.map(IMAGE_BASE, IMAGE_BASE + 0x1000);
     let hdr = &img.data[..0x1000.min(img.data.len())];

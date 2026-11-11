@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn main() {
+    nstrike::platform::reserve_memory();
     // guest calls nest on the host stack like the original's: run on a thread with a large one
     let code = std::thread::Builder::new().stack_size(256 << 20).spawn(run).unwrap().join().unwrap();
     nstrike::platform::kernel32::terminate(code);
@@ -76,5 +77,7 @@ fn cache_key(img: &Image) -> Option<[u8; 32]> {
     let mut h = Sha256::new();
     h.update(&own);
     h.update(&img.data);
+    // the memory's base, a constant in the code when fixed
+    h.update(nstrike::lift::FIXED_BASE.load(std::sync::atomic::Ordering::Relaxed).to_le_bytes());
     Some(h.finalize().into())
 }
