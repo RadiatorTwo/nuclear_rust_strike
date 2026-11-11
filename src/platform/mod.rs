@@ -903,6 +903,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (wide::RENDER_POLY, wide::render_poly),
     (ao::PROJECT_TERRAIN, ao::project_terrain),
     (lights::PYRO_DRAW, lights::pyro_draw),
+    (shadows::MODEL_FACE, shadows::model_face),
     (ao::PROJECT_MODEL, ao::project_model),
 ];
 

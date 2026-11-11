@@ -261,6 +261,11 @@ pub fn casting(on: bool) {
     CASTING.with(|c| c.set(on));
 }
 
+/// The shadows' object ring is being drawn.
+pub fn is_casting() -> bool {
+    CASTING.with(|c| c.get())
+}
+
 /// The screen window's x scale times `k`.
 fn scale(k: f32) {
     let base = BASE.load(Ordering::Relaxed) as i32;

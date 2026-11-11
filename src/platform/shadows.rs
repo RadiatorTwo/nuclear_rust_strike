@@ -27,6 +27,11 @@
 //! It is read with the camera (`ao.rs`, at the terrain's projection: the picture's own camera
 //! and sun, also between logic frames) and turned into the shaders' view space (y up).
 //!
+//! The game leaves out a model's faces turned away from the camera (`MODEL_FACE` 0x411ca4: the
+//! face's normal against the view direction, unless its first byte says two-sided): the far
+//! side of a boat cast nothing. In the ring every face is made two-sided while it is drawn
+//! (`model_face`): the sun sees the sides the camera does not.
+//!
 //! Setting `shadows` (F11), `NSTRIKE_SHADOWS=0/1`; `NSTRIKE_GBUFFER=shadows` shows the shadow
 //! alone; tuning `NSTRIKE_SHADOW_STRENGTH`. Setting `shadow_quality` (F11,
 //! `NSTRIKE_SHADOW_QUALITY=low|mid|high|ultra`, `Look`): the map's size, the lookup's
@@ -101,6 +106,23 @@ pub fn set_enabled(on: bool) {
 
 /// The sun in camera space (Actor3D_UpdateSun_'s result).
 const SUN_CAMERA: u32 = 0x503f2e;
+
+/// Draws a model's face (called by Actor3D_Render_ per face): eax the face record, its first
+/// byte non-zero for two-sided (else left out when turned away from the camera).
+pub const MODEL_FACE: u32 = 0x411ca4;
+
+/// In the shadows' ring: the face drawn as two-sided (its byte put back afterwards).
+pub fn model_face(c: &mut crate::rt::Cpu) {
+    if !super::wide::is_casting() {
+        return crate::rt::call_original(c, MODEL_FACE);
+    }
+    let m = super::mem();
+    let face = c.r[crate::rt::EAX];
+    let was = m.rd8(face);
+    m.wr8(face, 1);
+    crate::rt::call_original(c, MODEL_FACE);
+    m.wr8(face, was);
+}
 
 /// How dark a shadow is (0...1).
 pub const STRENGTH: f32 = 0.5;

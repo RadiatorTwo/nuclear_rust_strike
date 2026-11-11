@@ -138,7 +138,8 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       (F11). Open: strength and reach by the user's look, other missions' sequences
 - [x] Step 3, shadows (2026-11-11, `shadows.rs`): shadow map of the game's triangles from the
       game's sun; the objects of the tiles around the picture are drawn too, zoomed out, only
-      as casters (`pictures::shadow_ring`). Open: the terrain beyond the picture casts nothing
+      as casters (`pictures::shadow_ring`); in the ring faces turned away from the camera are
+      made too (`shadows::model_face`, 2026-11-11). Open: the terrain beyond the picture casts nothing
       (its table is full at 16:9); cost ~30%
 - [x] Step 4, bloom (2026-11-11, `bloom.rs`, FCop's): the bright part of the 3D picture
       (threshold lower where the mask says additive), a chain of 6 levels down and up, added

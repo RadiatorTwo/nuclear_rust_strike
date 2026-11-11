@@ -326,7 +326,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   more; objects' primitives in the picture itself are no casters (`wide::object` in
   `draw_obj`, `glide::set_no_cast`, `no_cast_parts` of the batch): the game leaves out
   objects and triangles off its screen, a shadow popped at the screen's edge (2026-11-11; only
-  the ring's tiles before). Lists (rows `[0x51b65c]..[0x51b654]`,
+  the ring's tiles before). It also leaves out a model's faces turned away from the camera
+  (0x411ca4, called by Actor3D_Render_ per face: normal against the view direction, unless the
+  face's first byte says two-sided): in the ring every face is two-sided while it is drawn
+  (`shadows::model_face`; ring faces made 57% -> 99%; the far side of the start boat cast
+  nothing). Lists (rows `[0x51b65c]..[0x51b654]`,
   columns `[0x51b658]..[0x51b650]`, lists at 0x507e50 + row 0x600 + column 0x18; a tile is
   2048 units) with the projection zoomed out by 2 (`wide::zoom_out`, y scale `[0x568af4]`,
   margin `[0x568afc]`, bound `[0x568b04]`), objects put back afterwards (`in_picture`); their
