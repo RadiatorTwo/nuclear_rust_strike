@@ -403,7 +403,11 @@ pub fn with_gl<R>(f: impl FnOnce(&glow::Context) -> R) -> Option<R> {
             *SHARE_WANTED.lock().unwrap() = true;
             let mut given = SHARE_GIVEN.lock().unwrap();
             while given.is_none() {
-                given = SHARE_CV.wait(given).unwrap();
+                given = SHARE_CV.wait_timeout(given, Duration::from_millis(50)).unwrap().0;
+                // another thread may have taken the one given (two waiting at once)
+                if given.is_none() {
+                    *SHARE_WANTED.lock().unwrap() = true;
+                }
             }
             *sh = given.take().map(super::gl::SharedParts::make_current);
         }
@@ -429,13 +433,17 @@ pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
         let look = *LOOK.lock().unwrap();
         let shown = look.and_then(|mut l| {
             l.shown = (tex, w, h, false, gamma);
-            SHARED.with_borrow(|sh| {
+            // shown by the present thread once the GPU has rendered it
+            let fence = SHARED.with_borrow(|sh| {
                 let s = sh.as_ref()?;
-                if let Some((px, pw, ph)) = s.present(&l, shot_due(false), super::frames::vsync()) {
-                    write_shot(&px, pw, ph);
+                unsafe {
+                    let f = glow::HasContext::fence_sync(&s.gl, glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
+                    glow::HasContext::flush(&s.gl);
+                    f
                 }
-                Some(l)
-            })
+            })?;
+            present_later(Job { look: l, fence: Fence(fence), shot: shot_due(false), vsync: super::frames::vsync() });
+            Some(l)
         });
         if let Some(l) = shown {
             // only the picture: overlay, video and size are the window's thread's, which may
@@ -471,6 +479,79 @@ pub fn show_texture(tex: glow::Texture, w: u32, h: u32, gamma: f32) {
             host.app.draw();
         }
     });
+}
+
+/// A picture of another thread for the present thread: what to draw, the fence of its
+/// rendering, whether a screenshot is due, the swap waiting for the display's refresh.
+struct Job {
+    look: super::gl::Look,
+    fence: Fence,
+    shot: bool,
+    vsync: bool,
+}
+
+/// The present thread's next picture, and whether it is drawing one.
+static PRESENTER: Mutex<(Option<Job>, bool)> = Mutex::new((None, false));
+static PRESENT_CV: std::sync::Condvar = std::sync::Condvar::new();
+static PRESENT_THREAD: std::sync::Once = std::sync::Once::new();
+
+/// Hand a picture to the present thread (made at the first one), after the one before is
+/// shown. The game thread swapped itself before: the swap took 0.4 to 0.7 ms of its time
+/// (~15% at 200 fps), waiting in the driver. The buffers trade places at grBufferSwap, so the
+/// game draws into the other one meanwhile.
+fn present_later(job: Job) {
+    PRESENT_THREAD.call_once(|| {
+        std::thread::Builder::new().name("present".into()).spawn(present_loop).expect("present thread");
+    });
+    let mut p = PRESENTER.lock().unwrap();
+    while p.0.is_some() || p.1 {
+        p = PRESENT_CV.wait(p).unwrap();
+    }
+    p.0 = Some(job);
+    PRESENT_CV.notify_all();
+}
+
+/// Wait until the present thread has shown the picture handed to it (before the buffers it
+/// reads are made anew or deleted).
+pub fn present_wait() {
+    let mut p = PRESENTER.lock().unwrap();
+    while p.0.is_some() || p.1 {
+        p = PRESENT_CV.wait(p).unwrap();
+    }
+}
+
+fn present_loop() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    }
+    // its own context sharing the window's
+    with_gl(|_| ());
+    loop {
+        let job = {
+            let mut p = PRESENTER.lock().unwrap();
+            while p.0.is_none() {
+                p = PRESENT_CV.wait(p).unwrap();
+            }
+            p.1 = true;
+            p.0.take().unwrap()
+        };
+        let shot = SHARED.with_borrow(|sh| {
+            let s = sh.as_ref()?;
+            unsafe {
+                // the GPU waits for the rendering, not this thread
+                glow::HasContext::wait_sync(&s.gl, job.fence.0, 0, glow::TIMEOUT_IGNORED);
+                glow::HasContext::delete_sync(&s.gl, job.fence.0);
+            }
+            s.present(&job.look, job.shot, job.vsync)
+        });
+        if let Some((px, pw, ph)) = shot {
+            write_shot(&px, pw, ph);
+        }
+        PRESENTER.lock().unwrap().1 = false;
+        PRESENT_CV.notify_all();
+    }
 }
 
 /// NSTRIKE_SHOT=file.png: the picture shown is written there (as the window shows it), at most

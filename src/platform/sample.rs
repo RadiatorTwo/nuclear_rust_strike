@@ -100,7 +100,9 @@ fn sample(h: windows_sys::Win32::Foundation::HANDLE) {
             let base = stack.as_ptr() as u64;
             let mut c = ctx;
             c.Rsp = base;
-            for _ in 0..8 {
+            // (a module's frames one after another named once: the driver's run deep)
+            let mut last = key.clone();
+            for _ in 0..40 {
                 let mut image = 0u64;
                 let f = unsafe { RtlLookupFunctionEntry(c.Rip, &mut image, std::ptr::null_mut()) };
                 if !(base..base + stack_len as u64 - 8).contains(&c.Rsp) {
@@ -116,7 +118,11 @@ fn sample(h: windows_sys::Win32::Foundation::HANDLE) {
                 if c.Rip == 0 {
                     break;
                 }
-                key = format!("{key} <- {}", name(c.Rip as usize, &mut modules));
+                let n = name(c.Rip as usize, &mut modules);
+                if n != last || ours(c.Rip) {
+                    key = format!("{key} <- {n}");
+                    last = n;
+                }
                 if ours(c.Rip) {
                     break;
                 }

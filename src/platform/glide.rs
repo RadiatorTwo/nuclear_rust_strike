@@ -964,6 +964,8 @@ impl Glide {
             self.multisample(gl, false);
             return;
         }
+        // the present thread may still be drawing the front buffer
+        super::window::present_wait();
         // the same aspect (a menu, the window to fullscreen): the pictures are kept, scaled.
         // The game draws a menu's background once and then only what changes: black buffers
         // left the menu black. Another aspect (wide and 4:3 in a mission) stays black: what
@@ -2029,6 +2031,7 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         if let Some((rb, _)) = g.ms.take() {
             gl.delete_renderbuffer(rb);
         }
+        super::window::present_wait();
         for t in [g.color, g.front, g.aux] {
             gl.delete_texture(t);
         }

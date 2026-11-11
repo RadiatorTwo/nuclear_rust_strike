@@ -148,10 +148,17 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   (2026-11-08). Per logic frame the point followed is noted (`base`: the camera less that
   offset, with the game's own matrix); a picture interpolates the fine angles, builds the
   matrix in floats (`rot_yxz` = BuildRotMatrixYXZ_) and places the camera from `base`.
-  The game thread shows its pictures itself (`window::show_texture` -> `gl::Shared::present`:
-  blit and swap with its shared context, right after `frames::pace`; `gl::PAINT` keeps the
-  window's thread from drawing at the same time, `window::LOOK` carries overlay, video and
-  window size over). The window's thread showed them at its next turn: 1.2 to 7 ms apart at
+  A present thread of ours shows the game's pictures (`window::present_later`, 2026-11-11):
+  `show_texture` on the game thread sets a fence and hands the picture over (waiting only
+  while the one before is still being shown); the present thread (priority HIGHEST, its own
+  shared context) waits for the fence on the GPU and runs `gl::Shared::present` (blit and
+  swap; `gl::PAINT` keeps the window's thread from drawing at the same time, `window::LOOK`
+  carries overlay, video and window size over). The buffers trade places at grBufferSwap, so
+  the game draws into the other one meanwhile; `glide`'s resize and grSstWinClose wait
+  (`present_wait`) before they make anew or delete them. The game thread swapped itself
+  before: SwapBuffers took 0.4 to 0.7 ms of its time in the driver (also with all effects
+  off), ~15% at 200 fps (mission 1 ~202 -> ~243 fps). The window's thread showed them at its
+  next turn before that: 1.2 to 7 ms apart at
   240 fps while their contents were 4.2 ms apart (the helicopter shook against the ground).
   `pace` sleeps up to 1.5 ms before the due time and spins the rest (now 4.0 to 4.4 ms).
   With the setting `vsync` (F10, `NSTRIKE_VSYNC`) the shared context swaps with interval 1
@@ -188,7 +195,10 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   features (`cranelift_native`); our Rust built with `target-cpu=x86-64-v3` was not faster
   (A/B 2026-11-11). Samples of `_bezBezierParameterize` are the hooked terrain projection
   0x4b96c0 after it (6%: a native version would be ~5%); 0x475314 / 0x475a34 (~9%) are
-  gl_RenderPoly_'s renderers of poly types 8 and 9. Left: GL driver ~20% (flush ~8%: data
+  gl_RenderPoly_'s renderers of poly types 8 and 9. Tried (2026-11-11, no gain, not kept): the 0xc7f
+  versions over single-entry regions with forward branches (their clamps fcomp, fnstsw,
+  sahf, jae cut the straight runs short): the renderers' cost is their size (~50 KB of
+  machine code each, the memory base spilled and reloaded at every access), not the rounding. Left: GL driver ~20% (flush ~8%: data
   2%, draw 2%, state), `Glide::add` with the depth lookup ~12%. Our own code
   symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
   dir) and `NSTRIKE_SAMPLE_RAW`.
@@ -222,7 +232,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   module, every 2 s; with `NSTRIKE_DUMP=<addr>` that function by offset in its machine code, as
   the dump shows it; `NSTRIKE_SAMPLE_RAW=<file>` all samples, our own code as `nstrike.exe+off`:
   symbolise with a build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and
-  llvm-symbolizer; in system code the stack is unwound to our frame: "ntdll <- nvoglv64 <-
+  llvm-symbolizer; in system code the stack is unwound to our frame (40 frames, a module's run named once): "ntdll <- nvoglv64 <-
   nstrike.exe+off").
 - x87 registers cached (2026-11-07, ~415 -> ~520 fps with the next item; outdated: 2026-11-08
   ~240-280 fps, CPU-bound as always): `lift/x87.rs`
