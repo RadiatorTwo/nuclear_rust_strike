@@ -27,6 +27,7 @@ mod font;
 pub mod miles;
 pub mod misc;
 pub mod pictures;
+pub mod projection;
 pub mod sample;
 pub mod text;
 pub mod user32;

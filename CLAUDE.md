@@ -204,7 +204,14 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   before compiling; the lifter takes the base as a constant (`lift::FIXED_BASE`, in the
   cache key), folded into each access's displacement: no register, no reload from the stack.
   If the place is taken, the base is read from `Cpu::mem` as before (logged); the tests
-  reserve memory per guest and keep that path. Left: GL driver ~20% (flush ~8%: data
+  reserve memory per guest and keep that path.
+  Then (2026-11-12, ~276 -> ~294 fps): the two projections (0x4b96c0 terrain, 0x4b98c2
+  models; ~11% of the game thread lifted) run in Rust (`projection.rs`, from `ao`'s hooks):
+  the same operations in the same order, the SSE rounding truncating for the whole list and
+  each result cut to 24 bits (as `arith_rz`), the original's quirks kept (the model's last
+  point not in its "any on screen", its edx). `NSTRIKE_PROJ_CHECK=1` runs both and logs
+  differences (none in ~940 000 lists of mission 1). Samples named `_bezBezierParameterize`
+  were these. Left: GL driver ~20% (flush ~8%: data
   2%, draw 2%, state), `Glide::add` with the depth lookup ~12%. Our own code
   symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
   dir) and `NSTRIKE_SAMPLE_RAW`.

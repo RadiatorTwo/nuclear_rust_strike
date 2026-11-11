@@ -9,7 +9,7 @@
 //! position (`depths`). Cleared at every picture shown.
 
 use super::arg;
-use crate::rt::{Cpu, EBX, ECX, call_original};
+use crate::rt::{Cpu, EBX, ECX};
 use glow::HasContext;
 use std::sync::Mutex;
 use std::cell::RefCell;
@@ -129,7 +129,7 @@ fn project(c: &mut Cpu, addr: u32) {
         *CAMERA.lock().unwrap() = [k * f(v) / 8.0, k * f(v + 4) / 8.0, f(v + 8) / 8.0, f(v + 0xc) / 8.0];
         *SUN.lock().unwrap() = super::shadows::sun();
     }
-    call_original(c, addr);
+    super::projection::run(c, addr, addr == PROJECT_MODEL);
     // one borrow for the whole list (one per point cost ~2% of the game thread)
     FRAME.with_borrow_mut(|f| {
         for k in 0..n.min(0x10000) {
