@@ -9,6 +9,7 @@
 pub mod advapi32;
 pub mod ao;
 pub mod lights;
+pub mod bloom;
 pub mod shadows;
 pub mod ddraw;
 pub mod dinput;
@@ -933,6 +934,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     ao::init();
     lights::init();
     shadows::init();
+    bloom::init();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
     m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);

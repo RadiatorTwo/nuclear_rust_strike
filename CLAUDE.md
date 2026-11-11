@@ -342,6 +342,14 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   per pixel in the last pass; low without the ring (objects cast from the screen: may pop at
   its edge); `NSTRIKE_GBUFFER=shadows`,
   `NSTRIKE_SHADOW_STRENGTH` (0...1).
+- `src/platform/bloom.rs` (new, future_rust_cop's): bloom, the last pass of `glide`'s
+  `post_3d` (HUD not bloomed): the 3D picture copied (resolved), its bright part at half
+  resolution (soft threshold 0.72, 0.5 where the depth attachment's mask G says additive), 6
+  RGBA16F levels down (13 taps) and up (tent, ONE/ONE), added at strength 0.35. Needs the
+  depth attachment for the mask (`ao::depth_wanted`); only pixels with depth or mask glow
+  (menus, loading pictures and the cockpit panel stay over frames: the glow piled up, white). Setting `bloom` (F11, `NSTRIKE_BLOOM`),
+  `NSTRIKE_GBUFFER=bloom` (debug view 5: the AO and lights passes draw as usual under it),
+  tuning `NSTRIKE_BLOOM_STRENGTH`, `NSTRIKE_BLOOM_THRESHOLD`.
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

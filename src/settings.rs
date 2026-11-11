@@ -78,11 +78,13 @@ pub struct Settings {
     /// sun shadows from what is on screen (`platform::shadows`)
     pub shadows: bool,
     pub shadow_quality: ShadowQuality,
+    /// a soft glow around bright things (`platform::bloom`)
+    pub bloom: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid, bloom: true }
     }
 }
 
@@ -143,6 +145,9 @@ pub fn get() -> Settings {
     }
     if let Some(v) = env("NSTRIKE_SHADOWS") {
         s.shadows = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_BLOOM") {
+        s.bloom = v == "1";
     }
     if let Some(q) = env("NSTRIKE_SHADOW_QUALITY").and_then(|v| ShadowQuality::parse(&v)) {
         s.shadow_quality = q;
@@ -207,6 +212,7 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "dynamic_lights" => v.parse().ok().map(|b| s.dynamic_lights = b),
             "shadows" => v.parse().ok().map(|b| s.shadows = b),
             "shadow_quality" => ShadowQuality::parse(v).map(|q| s.shadow_quality = q),
+            "bloom" => v.parse().ok().map(|b| s.bloom = b),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -273,7 +279,10 @@ pub fn render(s: &Settings) -> String {
          \n\
          # Shadow quality: \"low\" (only what is on screen casts: fastest), \"mid\", \"high\" or\n\
          # \"ultra\" (sharper edges, more work for the graphics card).\n\
-         shadow_quality = \"{}\"\n",
+         shadow_quality = \"{}\"\n\
+         \n\
+         # Bloom: a soft glow around bright things (fire, explosions): true or false.\n\
+         bloom = {}\n",
         s.fullscreen,
         s.vsync,
         list(MSAA_CHOICES),
@@ -284,6 +293,7 @@ pub fn render(s: &Settings) -> String {
         s.ambient_occlusion,
         s.dynamic_lights,
         s.shadows,
-        s.shadow_quality.name()
+        s.shadow_quality.name(),
+        s.bloom
     )
 }

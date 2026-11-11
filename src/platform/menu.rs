@@ -73,12 +73,13 @@ enum Row {
     Lights,
     Shadows,
     ShadowQuality,
+    Bloom,
     Close,
 }
 
 /// The settings page (F10) and the effects page (F11: the modern graphics effects).
 const SETTINGS: &[Row] = &[Row::Fullscreen, Row::Window, Row::FrameRate, Row::Vsync, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
-const EFFECTS: &[Row] = &[Row::Ao, Row::Lights, Row::Shadows, Row::ShadowQuality, Row::Close];
+const EFFECTS: &[Row] = &[Row::Ao, Row::Lights, Row::Shadows, Row::ShadowQuality, Row::Bloom, Row::Close];
 
 pub struct Menu {
     /// the page's rows: `SETTINGS` or `EFFECTS`
@@ -148,6 +149,7 @@ impl Menu {
                 let all = settings::ShadowQuality::ALL;
                 (vec!["Low".into(), "Mid".into(), "High".into(), "Ultra".into()], all.iter().position(|&q| q == s.shadow_quality).unwrap_or(1))
             }
+            Row::Bloom => (vec!["Off".into(), "On".into()], s.bloom as usize),
             Row::Close => (Vec::new(), 0),
         }
     }
@@ -179,6 +181,7 @@ impl Menu {
             Row::Lights => super::lights::set_enabled(k == 1),
             Row::Shadows => super::shadows::set_enabled(k == 1),
             Row::ShadowQuality => super::shadows::set_quality(settings::ShadowQuality::ALL[k]),
+            Row::Bloom => super::bloom::set_enabled(k == 1),
             Row::Close => {}
         }
         None
@@ -271,6 +274,7 @@ impl Menu {
                 Row::Lights => "Dynamic lights",
                 Row::Shadows => "Shadows",
                 Row::ShadowQuality => "Shadow quality",
+                Row::Bloom => "Bloom",
                 Row::Close => unreachable!(),
             };
             cv.label([rr[0] + 12, rr[1], rr[2], rr[3]], name, TEXT, 0, 2);
@@ -289,6 +293,7 @@ impl Menu {
             Row::Ao => "Corners and the ground under things darker",
             Row::Lights => "Muzzle flashes and explosions light what is near",
             Row::Shadows => "The sun casts shadows from what is on screen",
+            Row::Bloom => "A soft glow around fire and explosions",
             Row::ShadowQuality => match settings::get().shadow_quality {
                 settings::ShadowQuality::Low => "Fastest; things at the screen's edge may lose theirs",
                 settings::ShadowQuality::Mid => "Everything around casts; soft edges",

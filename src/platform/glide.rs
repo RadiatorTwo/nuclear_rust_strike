@@ -242,6 +242,7 @@ struct Glide {
     /// the sun's shadow (`shadows.rs`): this picture's casters (batched vertices), the map
     casters: Vec<u32>,
     shadow_map: Option<super::shadows::ShadowMap>,
+    bloom: Option<super::bloom::Bloom>,
 
     /// `add`'s scratch: the vertices' depths
     zs: Vec<f32>,
@@ -790,6 +791,7 @@ impl Glide {
                 lighting: None,
                 casters: Vec::new(),
                 shadow_map: None,
+                bloom: None,
 
                 zs: Vec::new(),
             };
@@ -1086,7 +1088,7 @@ impl Glide {
     }
 
     /// The 3D picture is drawn (the HUD comes next): the ambient occlusion over it, then the
-    /// dynamic lights.
+    /// dynamic lights, the bloom.
     fn post_3d(&mut self, gl: &glow::Context) {
         self.flush(gl);
         self.gbuf = false;
@@ -1114,6 +1116,10 @@ impl Glide {
         }
         if let (true, Some(cam)) = (super::lights::enabled(), super::ao::camera(target, map)) {
             self.lighting.get_or_insert_with(|| super::lights::Lighting::new(gl)).run(gl, tex, ms, target, cam, out, &lights);
+        }
+        if super::bloom::enabled() {
+            let clip = [0, 0, target.0 as i32, target.1 as i32];
+            self.bloom.get_or_insert_with(|| super::bloom::Bloom::new(gl)).run(gl, tex, ms, target, out, clip);
         }
     }
 
@@ -1877,6 +1883,9 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         }
         if let Some(mut m) = g.shadow_map.take() {
             m.delete(gl);
+        }
+        if let Some(mut b) = g.bloom.take() {
+            b.delete(gl);
         }
         // this thread's own objects (other threads' cannot be deleted here)
         if let Some(l) = g.locals.remove(&std::thread::current().id()) {

@@ -274,7 +274,11 @@ impl Lighting {
     /// The lights over the 3D picture: `depth` the attachment, `target` its size, `cam` the
     /// camera in target pixels, `out` a framebuffer with only the picture's colour.
     pub fn run(&mut self, gl: &glow::Context, depth: glow::Texture, ms: bool, target: (u32, u32), cam: ((f32, f32), (f32, f32)), out: glow::Framebuffer, lights: &[Light]) {
-        let show = ao::debug_view();
+        // the bloom alone (5): the picture as usual before it
+        let show = match ao::debug_view() {
+            5 => 0,
+            v => v,
+        };
         if lights.is_empty() && show != 3 || matches!(show, 1 | 2 | 4) {
             return;
         }

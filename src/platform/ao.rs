@@ -225,13 +225,13 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The depth is made: for the AO, the dynamic lights or the shadows.
+/// The depth is made: for the AO, the dynamic lights, the shadows or the bloom (its mask).
 pub fn depth_wanted() -> bool {
-    enabled() || super::lights::enabled() || super::shadows::enabled()
+    enabled() || super::lights::enabled() || super::shadows::enabled() || super::bloom::enabled()
 }
 
 /// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone, 3 the lights alone, 4 the
-/// shadows alone.
+/// shadows alone, 5 the bloom alone.
 pub fn debug_view() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *V.get_or_init(|| match std::env::var("NSTRIKE_GBUFFER").as_deref() {
@@ -239,6 +239,7 @@ pub fn debug_view() -> i32 {
         Ok("ao") => 2,
         Ok("lights") => 3,
         Ok("shadows") => 4,
+        Ok("bloom") => 5,
         _ => 0,
     })
 }
@@ -535,6 +536,7 @@ impl Ssao {
             // the shadows alone are shown as the AO alone
             let show = match debug_view() {
                 4 => 2,
+                5 => 0,
                 v => v,
             };
             if show == 0 {

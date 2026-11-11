@@ -140,8 +140,11 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       game's sun; the objects of the tiles around the picture are drawn too, zoomed out, only
       as casters (`pictures::shadow_ring`). Open: the terrain beyond the picture casts nothing
       (its table is full at 16:9); cost ~30%
-- [ ] Next: particles, smoke, heat shimmer, bloom (FCop's `effects.rs`, `heat.rs`,
-      `bloom.rs`; the pyro sequences tell the effects apart)
+- [x] Step 4, bloom (2026-11-11, `bloom.rs`, FCop's): the bright part of the 3D picture
+      (threshold lower where the mask says additive), a chain of 6 levels down and up, added
+      before the HUD. Setting `bloom` (F11). Mission 1: no measurable cost (~180 fps either way)
+- [ ] Next: particles, smoke, heat shimmer (FCop's `effects.rs`, `heat.rs`; the pyro
+      sequences tell the effects apart)
 
 ### 4. Later
 - [x] Videos (`videos.res`)
