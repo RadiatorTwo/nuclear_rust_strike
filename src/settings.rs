@@ -25,6 +25,37 @@ pub enum FrameRate {
     Fps(u32),
 }
 
+/// The sun shadows' quality (`platform::shadows`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShadowQuality {
+    /// a 1024² map, only what is on screen casts (objects at the screen's edge may lose
+    /// their shadow): the fastest
+    Low,
+    /// a 2048² map, all objects around cast, soft edges
+    Mid,
+    /// a 4096² map, edges a little soft
+    High,
+    /// a 4096² map, sharp edges
+    Ultra,
+}
+
+impl ShadowQuality {
+    pub const ALL: [ShadowQuality; 4] = [ShadowQuality::Low, ShadowQuality::Mid, ShadowQuality::High, ShadowQuality::Ultra];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ShadowQuality::Low => "low",
+            ShadowQuality::Mid => "mid",
+            ShadowQuality::High => "high",
+            ShadowQuality::Ultra => "ultra",
+        }
+    }
+
+    pub fn parse(v: &str) -> Option<ShadowQuality> {
+        Self::ALL.into_iter().find(|q| q.name().eq_ignore_ascii_case(v.trim_matches('"')))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// the window's size in pixels at the start; None: 1280x960 at the desktop's scale
@@ -44,11 +75,14 @@ pub struct Settings {
     pub ambient_occlusion: bool,
     /// dynamic lights: glows (muzzle flashes, explosions) light what is near them (`platform::lights`)
     pub dynamic_lights: bool,
+    /// sun shadows from what is on screen (`platform::shadows`)
+    pub shadows: bool,
+    pub shadow_quality: ShadowQuality,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid }
     }
 }
 
@@ -106,6 +140,12 @@ pub fn get() -> Settings {
     }
     if let Some(v) = env("NSTRIKE_LIGHTS") {
         s.dynamic_lights = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_SHADOWS") {
+        s.shadows = v == "1";
+    }
+    if let Some(q) = env("NSTRIKE_SHADOW_QUALITY").and_then(|v| ShadowQuality::parse(&v)) {
+        s.shadow_quality = q;
     }
     s
 }
@@ -165,6 +205,8 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "widescreen" => v.parse().ok().map(|b| s.widescreen = b),
             "ambient_occlusion" => v.parse().ok().map(|b| s.ambient_occlusion = b),
             "dynamic_lights" => v.parse().ok().map(|b| s.dynamic_lights = b),
+            "shadows" => v.parse().ok().map(|b| s.shadows = b),
+            "shadow_quality" => ShadowQuality::parse(v).map(|q| s.shadow_quality = q),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -224,7 +266,14 @@ pub fn render(s: &Settings) -> String {
          ambient_occlusion = {}\n\
          \n\
          # Dynamic lights: muzzle flashes and explosions light what is near them: true or false.\n\
-         dynamic_lights = {}\n",
+         dynamic_lights = {}\n\
+         \n\
+         # Shadows: the sun casts shadows from what is on screen: true or false.\n\
+         shadows = {}\n\
+         \n\
+         # Shadow quality: \"low\" (only what is on screen casts: fastest), \"mid\", \"high\" or\n\
+         # \"ultra\" (sharper edges, more work for the graphics card).\n\
+         shadow_quality = \"{}\"\n",
         s.fullscreen,
         s.vsync,
         list(MSAA_CHOICES),
@@ -233,6 +282,8 @@ pub fn render(s: &Settings) -> String {
         s.texture_filter,
         s.widescreen,
         s.ambient_occlusion,
-        s.dynamic_lights
+        s.dynamic_lights,
+        s.shadows,
+        s.shadow_quality.name()
     )
 }

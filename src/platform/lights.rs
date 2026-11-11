@@ -275,7 +275,7 @@ impl Lighting {
     /// camera in target pixels, `out` a framebuffer with only the picture's colour.
     pub fn run(&mut self, gl: &glow::Context, depth: glow::Texture, ms: bool, target: (u32, u32), cam: ((f32, f32), (f32, f32)), out: glow::Framebuffer, lights: &[Light]) {
         let show = ao::debug_view();
-        if lights.is_empty() && show != 3 || matches!(show, 1 | 2) {
+        if lights.is_empty() && show != 3 || matches!(show, 1 | 2 | 4) {
             return;
         }
         let (w, h) = (target.0 as i32, target.1 as i32);

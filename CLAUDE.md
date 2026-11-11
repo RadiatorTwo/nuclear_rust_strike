@@ -308,6 +308,40 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   (F11, `NSTRIKE_LIGHTS`), `NSTRIKE_GBUFFER=lights`, `NSTRIKE_LIGHT_STRENGTH`/`_REACH`,
   `NSTRIKE_LIGHT_PYROS` (hex list), `NSTRIKE_LIGHT_LOG=1` (glows by sequence). Fire keys in
   the test script: Space, Q, E after flying forward (`46000:Up*3000 49500:Space*3000`).
+- `src/platform/shadows.rs` (new): sun shadows from a shadow map of the game's own triangles.
+  `glide::flush` keeps the 3D triangles that write depth (gmode 1, all corners with depth) as
+  casters (batched vertices, chroma key in the constant colour's place); `post_3d` draws them
+  from the sun (orthographic, 2048², view space rebuilt from screen position and depth; keyed
+  and low-alpha texels cut: palm fronds) and the AO's half-resolution pass looks them up
+  (3x3 hardware PCF; applied with the AO, also with it off). The sun is the game's:
+  Actor3D_UpdateSun_ 0x410310 turns the light's direction `[0x503f28]` ((-147,-147,-147),
+  world y up) into camera space `[0x503f2e]` (y down; it points away from the sun); read with
+  the camera at the terrain's projection (`ao::sun`). A screen-space ray march came first: it
+  flickered under the rotor and stayed grey whatever the strength. Off-screen casters: after
+  ObjMgr_ProcessAllObj_ (0x42c088, hooked) and in pictures, `pictures::shadow_ring` draws the
+  object lists of ObjMgr's visible rectangle, the tiles around it and the high-rate list once
+  more; objects' primitives in the picture itself are no casters (`wide::object` in
+  `draw_obj`, `glide::set_no_cast`, `no_cast_parts` of the batch): the game leaves out
+  objects and triangles off its screen, a shadow popped at the screen's edge (2026-11-11; only
+  the ring's tiles before). Lists (rows `[0x51b65c]..[0x51b654]`,
+  columns `[0x51b658]..[0x51b650]`, lists at 0x507e50 + row 0x600 + column 0x18; a tile is
+  2048 units) with the projection zoomed out by 2 (`wide::zoom_out`, y scale `[0x568af4]`,
+  margin `[0x568afc]`, bound `[0x568b04]`), objects put back afterwards (`in_picture`); their
+  primitives are tagged in disp_AllocPoly_ (`wide::casting`) and in gl_RenderPoly_ go only
+  into the casters (`glide::set_cast_only`, `cast`: corners scaled back about the projection's
+  centre `ao::centre`). Tried before: a guard band zooming the whole picture and widening the
+  terrain trapezoid: the terrain's visibility table 0x520510 (9 x 33 x 34 cells of ~2 tiles,
+  read by 0x469574/0x469098 under Rndr_TerrainRender_, strides 0x467/0x22 and limit 0x21
+  fixed in ~18 functions) fits ~66 tiles at any heading, 16:9 already needs 65: streaks, then
+  crashes; a memory of drawn triangles in the world (camera matrix `[0x503f6a]` 3x3 i16 4096,
+  position `[0x503f54]`) lost moving things. Mission 1: shadows ~30% of the frame rate
+  (ring ~15%). Setting `shadows` (F11, `NSTRIKE_SHADOWS`); `shadow_quality` (F11,
+  `NSTRIKE_SHADOW_QUALITY=low|mid|high|ultra`, `shadows::look`): map 1024/2048/4096/4096,
+  PCF 3x3/5x5/5x5/5x5 taps 1/1.5/1.5/1 texels apart; low looks the shadow up in the AO's
+  half-resolution pass, blurred with it (~18 px: the map's size hardly mattered), the others
+  per pixel in the last pass; low without the ring (objects cast from the screen: may pop at
+  its edge); `NSTRIKE_GBUFFER=shadows`,
+  `NSTRIKE_SHADOW_STRENGTH` (0...1).
 - `src/main.rs`: `nstrike [NUKEPC.EXE]`; compiles (cached in `compiled.bin` beside the EXE)
   and runs it; imports without implementation stop with "import X is not implemented yet".
 - `cargo run --release --example dis -- game_files/NUKEPC/NUKEPC.EXE <addr|all>` disassembles.

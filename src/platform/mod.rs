@@ -9,6 +9,7 @@
 pub mod advapi32;
 pub mod ao;
 pub mod lights;
+pub mod shadows;
 pub mod ddraw;
 pub mod dinput;
 pub mod dsound;
@@ -880,6 +881,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (pictures::CAM_UPDATE, pictures::cam_update),
     (pictures::TERRAIN, pictures::terrain),
     (pictures::DRAW_OBJ, pictures::draw_obj),
+    (pictures::PROCESS_ALL, pictures::process_all),
     (pictures::DEATH_DOT, pictures::death_dot),
     (pictures::HUD_DRAW, pictures::hud_draw),
     (pictures::FRAME_CHANGE, pictures::frame_change),
@@ -930,6 +932,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     glide::init();
     ao::init();
     lights::init();
+    shadows::init();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);
     m.map(THUNK_LO, THUNK_LO + 4 * THUNK_N);

@@ -136,8 +136,12 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       and explosion pyros (sequence by hooking the pyro drawer 0x430970; colour could not tell
       a boat's wake from fire) light their surroundings after the AO. Setting `dynamic_lights`
       (F11). Open: strength and reach by the user's look, other missions' sequences
-- [ ] Step 3, shadows; then particles, smoke, heat shimmer, bloom (FCop's `shadows.rs`,
-      `effects.rs`, `heat.rs`, `bloom.rs`; the pyro sequences tell the effects apart)
+- [x] Step 3, shadows (2026-11-11, `shadows.rs`): shadow map of the game's triangles from the
+      game's sun; the objects of the tiles around the picture are drawn too, zoomed out, only
+      as casters (`pictures::shadow_ring`). Open: the terrain beyond the picture casts nothing
+      (its table is full at 16:9); cost ~30%
+- [ ] Next: particles, smoke, heat shimmer, bloom (FCop's `effects.rs`, `heat.rs`,
+      `bloom.rs`; the pyro sequences tell the effects apart)
 
 ### 4. Later
 - [x] Videos (`videos.res`)

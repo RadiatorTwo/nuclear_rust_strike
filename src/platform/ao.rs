@@ -82,16 +82,33 @@ fn point(x: i16, y: i16, z: u16) {
 /// pixels: sx = x * [0x4d002c] / z * [view] + [view + 8] (at 800x600: 24000, centre 3200; a
 /// narrow camera far away).
 static CAMERA: Mutex<[f32; 4]> = Mutex::new([0.0; 4]);
+/// The sun of the same picture (`shadows::sun`).
+static SUN: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 
-/// The camera in target pixels (`target` its size, `space` the game's resolution): focal (x, y)
-/// and centre (GL's, from below). None before a terrain was projected.
-pub fn camera(target: (u32, u32), space: (u32, u32)) -> Option<((f32, f32), (f32, f32))> {
+/// Toward the sun in view space, as read with the camera.
+pub fn sun() -> Option<[f32; 3]> {
+    *SUN.lock().unwrap()
+}
+
+/// The projection's centre in game pixels.
+pub fn centre() -> Option<(f32, f32)> {
+    let cam = *CAMERA.lock().unwrap();
+    (cam[0] > 0.0).then_some((cam[2], cam[3]))
+}
+
+/// Game pixels to target pixels for the 3D picture (`glide`'s view): x = ox + x * kx, y from
+/// the top = oy + y * ky.
+pub type Map = [f32; 4];
+
+/// The camera in target pixels (`target` its size, `map` the 3D picture's): focal (x, y) and
+/// centre (GL's, from below). None before a terrain was projected.
+pub fn camera(target: (u32, u32), map: Map) -> Option<((f32, f32), (f32, f32))> {
     let cam = *CAMERA.lock().unwrap();
     if cam[0] <= 0.0 || cam[1] <= 0.0 {
         return None;
     }
-    let (kx, ky) = (target.0 as f32 / space.0 as f32, target.1 as f32 / space.1 as f32);
-    Some(((cam[0] * kx, cam[1] * ky), (cam[2] * kx, target.1 as f32 - cam[3] * ky)))
+    let [ox, oy, kx, ky] = map;
+    Some(((cam[0] * kx, cam[1] * ky), (ox + cam[2] * kx, target.1 as f32 - (oy + cam[3] * ky))))
 }
 
 fn project(c: &mut Cpu, addr: u32) {
@@ -101,6 +118,7 @@ fn project(c: &mut Cpu, addr: u32) {
         let f = |a: u32| f32::from_bits(m.rd32(a));
         let (k, v) = (f(0x4d002c), c.r[ECX]);
         *CAMERA.lock().unwrap() = [k * f(v) / 8.0, k * f(v + 4) / 8.0, f(v + 8) / 8.0, f(v + 0xc) / 8.0];
+        *SUN.lock().unwrap() = super::shadows::sun();
     }
     call_original(c, addr);
     for k in 0..n.min(0x10000) {
@@ -207,18 +225,20 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The depth is made: for the AO or the dynamic lights.
+/// The depth is made: for the AO, the dynamic lights or the shadows.
 pub fn depth_wanted() -> bool {
-    enabled() || super::lights::enabled()
+    enabled() || super::lights::enabled() || super::shadows::enabled()
 }
 
-/// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone, 3 the lights alone.
+/// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone, 3 the lights alone, 4 the
+/// shadows alone.
 pub fn debug_view() -> i32 {
     static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *V.get_or_init(|| match std::env::var("NSTRIKE_GBUFFER").as_deref() {
         Ok("depth") => 1,
         Ok("ao") => 2,
         Ok("lights") => 3,
+        Ok("shadows") => 4,
         _ => 0,
     })
 }
@@ -270,18 +290,14 @@ vec3 N(ivec2 q, float z, vec3 p, int s) {
 const AO_FS: &str = r#"
 uniform float radius;
 uniform float max_px;
+uniform int use_ao;      // the occlusion (else 1)
+uniform int use_sun;     // the sun's shadow (shadows.rs)
+uniform float sun_k;
 out vec4 o;
 const int SAMPLES = 12;
-void main() {
-    ivec2 q = ivec2(gl_FragCoord.xy) * 2;
-    float z = G(q).r;
-    if (z <= 0.0) { o = vec4(1.0); return; }
-    vec3 p = P(vec2(q), z);
-    vec3 n = N(q, z, p, 2);
-    // a different turn of the samples at every pixel (interleaved gradient noise), blurred after
-    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+float occlusion(ivec2 q, float z, vec3 p, vec3 n, float ign) {
     float rpx = min(radius * focal.y / z, max_px);
-    if (rpx < 2.0) { o = vec4(1.0); return; }
+    if (rpx < 2.0) return 1.0;
     float a = 6.2831853 * ign;
     float occ = 0.0;
     for (int i = 0; i < SAMPLES; i++) {
@@ -295,7 +311,19 @@ void main() {
         if (d < 1e-3) continue;
         occ += max(dot(v / d, n) - 0.05, 0.0) * (1.0 - smoothstep(0.5 * radius, radius, d));
     }
-    o = vec4(pow(clamp(1.0 - 4.0 * occ / float(SAMPLES), 0.0, 1.0), 2.0));
+    return pow(clamp(1.0 - 4.0 * occ / float(SAMPLES), 0.0, 1.0), 2.0);
+}
+void main() {
+    ivec2 q = ivec2(gl_FragCoord.xy) * 2;
+    float z = G(q).r;
+    if (z <= 0.0) { o = vec4(1.0); return; }
+    vec3 p = P(vec2(q), z);
+    vec3 n = N(q, z, p, 2);
+    // a different turn of the samples at every pixel (interleaved gradient noise), blurred after
+    float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float v = use_ao != 0 ? occlusion(q, z, p, n, ign) : 1.0;
+    if (use_sun != 0) v *= 1.0 - sun_k * shadow(p, n);
+    o = vec4(v);
 }
 "#;
 
@@ -328,6 +356,8 @@ uniform sampler2D ao;
 uniform float strength;
 uniform float edge;
 uniform int show;       // 0 the AO as a factor, 1 the depth, 2 the AO alone
+uniform int use_sun;    // the sun's shadow here, at full resolution (high quality)
+uniform float sun_k;
 out vec4 o;
 void main() {
     ivec2 q = ivec2(gl_FragCoord.xy);
@@ -352,6 +382,10 @@ void main() {
             wsum += w;
         }
         v = sum / wsum;
+        if (use_sun != 0) {
+            vec3 p = P(vec2(q), z);
+            v *= 1.0 - sun_k * shadow(p, N(q, z, p, 1));
+        }
     }
     if (show == 2) { o = vec4(vec3(v), 1.0); return; }
     o = vec4(vec3(mix(1.0, v, strength * (1.0 - clamp(g.g, 0.0, 1.0)))), 1.0);
@@ -371,7 +405,7 @@ pub struct Ssao {
 
 impl Ssao {
     pub fn new(gl: &glow::Context) -> Ssao {
-        let prog = |fs: &str, ms: bool| super::gl::compile(gl, VS, &format!("{}{COMMON}{fs}", if ms { "#define MS\n" } else { "" }));
+        let prog = |fs: &str, ms: bool| super::gl::compile(gl, VS, &format!("{}{COMMON}{}{fs}", if ms { "#define MS\n" } else { "" }, super::shadows::GLSL));
         let progs = [AO_FS, BLUR_FS, APPLY_FS].map(|fs| [prog(fs, false), prog(fs, true)]);
         let vao = unsafe { gl.create_vertex_array().expect("GL vertex array") };
         Ssao { progs, vao, half: None }
@@ -419,13 +453,18 @@ impl Ssao {
     }
 
     /// The passes over the 3D picture: `depth` the attachment (multisampled or not), `target`
-    /// its size, `space` the vertices' (the game's resolution), `out` a framebuffer with only
-    /// the picture's colour.
-    pub fn run(&mut self, gl: &glow::Context, depth: glow::Texture, ms: bool, target: (u32, u32), space: (u32, u32), out: glow::Framebuffer) {
+    /// its size, `map` game to target pixels, `out` a framebuffer with only the picture's
+    /// colour.
+    /// `ao`: the occlusion, `sun`: the sun's shadow map (either may be off).
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(&mut self, gl: &glow::Context, depth: glow::Texture, ms: bool, target: (u32, u32), map: Map, out: glow::Framebuffer, ao: bool, sun: Option<&super::shadows::View>) {
+        if !ao && sun.is_none() {
+            return;
+        }
         let (w, h) = (target.0 as i32, target.1 as i32);
         let hs = ((w + 1) / 2, (h + 1) / 2);
         let half = self.half(gl, hs);
-        let Some((focal, centre)) = camera(target, space) else { return };
+        let Some((focal, centre)) = camera(target, map) else { return };
         let radius = tune("NSTRIKE_AO_RADIUS", RADIUS);
         let edge = 0.5 * radius;
         let v = ms as usize;
@@ -441,6 +480,8 @@ impl Ssao {
                 let u = move |n: &'static str| super::gl::uniform(gl, p, n);
                 gl.uniform_1_i32(u("gdepth").as_ref(), 0);
                 gl.uniform_1_i32(u("ao").as_ref(), 1);
+                // the shadow map's unit (a sampler of another type must not share unit 0)
+                gl.uniform_1_i32(u("smap").as_ref(), 2);
                 gl.uniform_2_i32(u("size").as_ref(), w, h);
                 gl.uniform_2_f32(u("focal").as_ref(), focal.0, focal.1);
                 gl.uniform_2_f32(u("centre").as_ref(), centre.0, centre.1);
@@ -453,6 +494,30 @@ impl Ssao {
             let u = common(self.progs[0][v]);
             gl.uniform_1_f32(u("radius").as_ref(), radius);
             gl.uniform_1_f32(u("max_px").as_ref(), h as f32 / 4.0);
+            gl.uniform_1_i32(u("use_ao").as_ref(), ao as i32);
+            // the sun's shadow: here (half resolution, blurred with the AO), or at full
+            // resolution in the last pass (high quality: the map's detail is kept)
+            let look = super::shadows::look();
+            let full = look.full;
+            let set_sun = |u: &dyn Fn(&'static str) -> Option<glow::UniformLocation>, on: bool| {
+                gl.uniform_1_i32(u("use_sun").as_ref(), (on && sun.is_some()) as i32);
+                gl.uniform_1_f32(u("sun_k").as_ref(), tune("NSTRIKE_SHADOW_STRENGTH", super::shadows::STRENGTH).clamp(0.0, 1.0));
+                if let Some(v) = sun.filter(|_| on) {
+                    gl.active_texture(glow::TEXTURE2);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(v.tex));
+                    gl.uniform_1_i32(u("smap").as_ref(), 2);
+                    gl.uniform_1_i32(u("staps").as_ref(), look.taps);
+                    gl.uniform_1_f32(u("sstep").as_ref(), look.step);
+                    let [x, y, z] = v.axes;
+                    gl.uniform_3_f32(u("sx").as_ref(), x[0], x[1], x[2]);
+                    gl.uniform_3_f32(u("sy").as_ref(), y[0], y[1], y[2]);
+                    gl.uniform_3_f32(u("sz").as_ref(), z[0], z[1], z[2]);
+                    gl.uniform_4_f32(u("srect").as_ref(), v.rect[0], v.rect[1], v.rect[2], v.rect[3]);
+                    gl.uniform_2_f32(u("sdepth").as_ref(), v.depth[0], v.depth[1]);
+                    gl.active_texture(glow::TEXTURE0);
+                }
+            };
+            set_sun(&u, !full);
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             // blurred across, then down
             gl.active_texture(glow::TEXTURE1);
@@ -467,19 +532,29 @@ impl Ssao {
             gl.bind_texture(glow::TEXTURE_2D, Some(half[0].0));
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(out));
             gl.viewport(0, 0, w, h);
-            let show = debug_view();
+            // the shadows alone are shown as the AO alone
+            let show = match debug_view() {
+                4 => 2,
+                v => v,
+            };
             if show == 0 {
                 gl.enable(glow::BLEND);
                 gl.blend_func(glow::DST_COLOR, glow::ZERO);
             }
             let u = common(self.progs[2][v]);
-            gl.uniform_1_f32(u("strength").as_ref(), tune("NSTRIKE_AO_STRENGTH", STRENGTH));
+            gl.uniform_1_f32(u("strength").as_ref(), if ao { tune("NSTRIKE_AO_STRENGTH", STRENGTH) } else { 1.0 });
             gl.uniform_1_i32(u("show").as_ref(), show);
+            gl.active_texture(glow::TEXTURE1);
+            set_sun(&u, full);
+            gl.active_texture(glow::TEXTURE1);
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.disable(glow::BLEND);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(kind, None);
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }

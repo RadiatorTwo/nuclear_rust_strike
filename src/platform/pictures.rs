@@ -34,6 +34,8 @@ use std::time::Instant;
 pub const CAM_UPDATE: u32 = 0x46cd94;
 pub const TERRAIN: u32 = 0x469a34;
 pub const DRAW_OBJ: u32 = 0x42c018;
+/// ObjMgr_ProcessAllObj_: the objects of the visible tiles moved and drawn (once a logic frame).
+pub const PROCESS_ALL: u32 = 0x42c088;
 pub const DEATH_DOT: u32 = 0x411b90;
 pub const HUD_DRAW: u32 = 0x45eb9c;
 pub const FRAME_CHANGE: u32 = 0x47adac;
@@ -554,7 +556,9 @@ pub fn draw_obj(c: &mut Cpu) {
     for (o, _, p) in &put {
         write(o + PLACE, p);
     }
+    let was = super::wide::object(true);
     with_view(c, |c| call_original(c, DRAW_OBJ));
+    super::wide::object(was);
     // back to the real place, unless drawing moved the object itself (a load on the hook
     // follows it there: put back, it never arrived, and the pick-up kept the controls)
     for (o, cur, p) in &put {
@@ -636,6 +640,7 @@ pub fn picture(c: &mut Cpu) {
     m.wr8(OBJ_FLAGS, flags | 3);
     draw_list(c, m.rd32(HIGH_LIST));
     m.wr8(OBJ_FLAGS, flags);
+    shadow_ring(c);
     call(c, DEATH_DOT, [0; 4]);
     call(c, HUD_DRAW, [m.rd32(PLAYER), 0, 0, 0]);
     call(c, DRAW_OT, [m.rd32(OT), 1, 0, 0]);
@@ -673,6 +678,50 @@ fn timing(swap: std::time::Duration, draw: std::time::Duration) {
 }
 
 /// The objects of a list (nodes: `[node]` the next, the object at +8).
+/// ObjMgr_ProcessAllObj_, then the shadows' object ring.
+pub fn process_all(c: &mut Cpu) {
+    call_original(c, PROCESS_ALL);
+    shadow_ring(c);
+}
+
+/// The projection's zoom for the ring: a tile (2048 units) around a picture ~5700 wide fits.
+const RING_ZOOM: (f32, f32) = (2.0, 2.0);
+
+/// The shadows' objects: all objects of the visible tiles, the tiles around them and the
+/// high-rate list are drawn again with the projection zoomed out (the game leaves out what is
+/// off its screen, whole objects and an object's triangles); these primitives only cast
+/// shadows (`wide::casting`, `glide::set_cast_only`), and the objects' primitives in the
+/// picture do not (`wide::object`, `glide::set_no_cast`): a shadow no longer pops when its
+/// object reaches the screen's edge, and trees and vehicles just outside cast into it. Drawing an object changes it (a rotor turns): it is
+/// put back afterwards, as in a picture (`draw_obj`).
+fn shadow_ring(c: &mut Cpu) {
+    if !super::shadows::ring() {
+        return;
+    }
+    let m = mem();
+    let (r0, r1, c0, c1) = (m.rd32(ROW_LO) as i32, m.rd32(ROW_HI) as i32, m.rd32(COL_LO) as i32, m.rd32(COL_HI) as i32);
+    if r0 > r1 || c0 > c1 {
+        return;
+    }
+    super::wide::zoom_out(RING_ZOOM);
+    super::glide::set_ring_zoom(RING_ZOOM);
+    super::wide::casting(true);
+    let was = std::mem::replace(&mut state().in_picture, true);
+    let flags = m.rd8(OBJ_FLAGS);
+    m.wr8(OBJ_FLAGS, flags | 1);
+    for r in (r0 - 1).max(0)..=(r1 + 1).min(63) {
+        for q in (c0 - 1).max(0)..=(c1 + 1).min(63) {
+            draw_list(c, m.rd32(TILES.wrapping_add((r * 0x600 + q * 0x18) as u32)));
+        }
+    }
+    m.wr8(OBJ_FLAGS, flags | 3);
+    draw_list(c, m.rd32(HIGH_LIST));
+    m.wr8(OBJ_FLAGS, flags);
+    state().in_picture = was;
+    super::wide::casting(false);
+    super::wide::apply();
+}
+
 fn draw_list(c: &mut Cpu, mut node: u32) {
     let m = mem();
     let mut n = 0;

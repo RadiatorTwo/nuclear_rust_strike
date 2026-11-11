@@ -81,6 +81,11 @@ const WIDTH: u32 = 0x568ae0;
 const SCALE_X: u32 = 0x568af0;
 const MARGIN_X: u32 = 0x568af8;
 const BOUND_X: u32 = 0x568b00;
+/// The same for y.
+const HEIGHT: u32 = 0x568ae4;
+const SCALE_Y: u32 = 0x568af4;
+const MARGIN_Y: u32 = 0x568afc;
+const BOUND_Y: u32 = 0x568b04;
 
 const NARROW: f32 = 4.0 / 3.0;
 
@@ -138,6 +143,7 @@ pub fn reset() {
 /// one), and whether such a window is set (else a message box's or the map screen's: their
 /// drawing is unstretched, `Hud`).
 static BASE: AtomicU32 = AtomicU32::new(0);
+static BASE_Y: AtomicU32 = AtomicU32::new(0);
 static WINDOW_3D: AtomicBool = AtomicBool::new(true);
 
 fn mission() -> bool {
@@ -203,6 +209,7 @@ pub fn set_window(c: &mut Cpu) {
     WINDOW_3D.store(three_d, Ordering::Relaxed);
     if three_d {
         BASE.store(m.rd32(SCALE_X), Ordering::Relaxed);
+        BASE_Y.store(m.rd32(SCALE_Y), Ordering::Relaxed);
         apply();
     }
 }
@@ -211,6 +218,47 @@ pub fn set_window(c: &mut Cpu) {
 /// frame and a picture (in its static data, which a picture puts back afterwards).
 pub fn apply() {
     scale(if mission() { k() } else { 1.0 });
+}
+
+/// The projection zoomed out by `g` (x, y) for the shadows' object ring (`pictures::shadow_ring`):
+/// what stands around the picture falls inside the game's screen. `apply` puts it back.
+pub fn zoom_out(g: (f32, f32)) {
+    let (base, base_y) = (BASE.load(Ordering::Relaxed) as i32, BASE_Y.load(Ordering::Relaxed) as i32);
+    if base == 0 || base_y == 0 || !WINDOW_3D.load(Ordering::Relaxed) {
+        return;
+    }
+    let k = if mission() { k() } else { 1.0 };
+    let m = mem();
+    for (scale, size, margin_at, bound_at, s) in [(SCALE_X, WIDTH, MARGIN_X, BOUND_X, base as f32 * k / g.0), (SCALE_Y, HEIGHT, MARGIN_Y, BOUND_Y, base_y as f32 / g.1)] {
+        let s = s as i32;
+        let margin = ((s as i64 * 0x1000) >> 16) as i32;
+        m.wr32(scale, s as u32);
+        m.wr32(margin_at, margin as u32);
+        m.wr32(bound_at, (2 * margin + m.rd32(size) as i32) as u32);
+    }
+}
+
+thread_local! {
+    /// The shadows' object ring is drawn (its primitives only cast: `CAST`)
+    static CASTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// the primitives made while it was
+    static CAST: std::cell::RefCell<std::collections::HashSet<u32>> = std::cell::RefCell::new(std::collections::HashSet::new());
+    /// ObjMgr draws an object (outside the ring)
+    static OBJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// the primitives made while it did: not shadow casters (the ring's drawing of the same
+    /// objects is, whole, also where the game leaves out what is off its screen)
+    static NO_CAST: std::cell::RefCell<std::collections::HashSet<u32>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// ObjMgr's drawing of an object begins (`true`) or ends (`pictures::draw_obj`); the state
+/// before (objects draw their children).
+pub fn object(on: bool) -> bool {
+    OBJECT.with(|c| c.replace(on))
+}
+
+/// The shadows' object ring begins (`true`) or ends.
+pub fn casting(on: bool) {
+    CASTING.with(|c| c.set(on));
 }
 
 /// The screen window's x scale times `k`.
@@ -225,6 +273,14 @@ fn scale(k: f32) {
     m.wr32(SCALE_X, sx as u32);
     m.wr32(MARGIN_X, margin as u32);
     m.wr32(BOUND_X, (2 * margin + m.rd32(WIDTH) as i32) as u32);
+    // y as the game made it (`zoom_out` changes it)
+    let sy = BASE_Y.load(Ordering::Relaxed) as i32;
+    if sy != 0 {
+        let margin = ((sy as i64 * 0x1000) >> 16) as i32;
+        m.wr32(SCALE_Y, sy as u32);
+        m.wr32(MARGIN_Y, margin as u32);
+        m.wr32(BOUND_Y, (2 * margin + m.rd32(HEIGHT) as i32) as u32);
+    }
 }
 
 pub const ALLOC_POLY: u32 = 0x47af6c;
@@ -259,6 +315,25 @@ pub fn alloc_poly(c: &mut Cpu) {
     call_original(c, ALLOC_POLY);
     let p = c.r[EAX];
     super::lights::made(p, ret);
+    // the ring's primitives; an address used again by another is no longer one
+    if p != 0 {
+        let casting = CASTING.with(|c| c.get());
+        let object = !casting && OBJECT.with(|c| c.get());
+        CAST.with(|s| {
+            if casting {
+                s.borrow_mut().insert(p);
+            } else {
+                s.borrow_mut().remove(&p);
+            }
+        });
+        NO_CAST.with(|s| {
+            if object {
+                s.borrow_mut().insert(p);
+            } else {
+                s.borrow_mut().remove(&p);
+            }
+        });
+    }
     if p != 0 && (IN_HUD.with(|h| h.get()) || !WINDOW_3D.load(Ordering::Relaxed)) {
         HUD.with(|h| h.borrow_mut().insert(p));
     }
@@ -268,6 +343,8 @@ pub fn alloc_poly(c: &mut Cpu) {
 pub fn render_poly(c: &mut Cpu) {
     let hud = HUD.with(|h| h.borrow().contains(&c.r[EAX]));
     super::lights::drawing(c.r[EAX]);
+    glide::set_cast_only(CAST.with(|s| s.borrow().contains(&c.r[EAX])));
+    glide::set_no_cast(super::shadows::ring() && NO_CAST.with(|s| s.borrow().contains(&c.r[EAX])));
     glide::set_3d(!hud);
     glide::set_view(if hud { glide::View::Hud(0.5) } else { glide::View::Full });
     call_original(c, RENDER_POLY);

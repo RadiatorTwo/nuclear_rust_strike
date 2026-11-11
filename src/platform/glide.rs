@@ -206,6 +206,13 @@ struct Glide {
     /// constant r g b a (floats), the combine units and texture (see `add`), then the
     /// rectangle of the primitive's texture coordinates s0 t0 s1 t1 (floats)
     batch: Vec<u32>,
+    /// the primitives that follow only cast shadows (`set_cast_only`)
+    cast_only: bool,
+    /// the primitives that follow are an object's, drawn in the picture (`set_no_cast`): their
+    /// shadow comes from the ring's drawing of all objects, not from what is on the screen
+    no_cast: bool,
+    /// the parts of `batch` (word offsets) that are such objects' primitives
+    no_cast_parts: Vec<(usize, usize)>,
     batch_mode: u32,
     gamma: f32,
     /// the texture palette (grTexDownloadTable): 0xAARRGGBB, its alpha unused
@@ -232,6 +239,10 @@ struct Glide {
     /// dynamic lights (`lights.rs`): this picture's glows, and the pass
     lights: Vec<super::lights::Light>,
     lighting: Option<super::lights::Lighting>,
+    /// the sun's shadow (`shadows.rs`): this picture's casters (batched vertices), the map
+    casters: Vec<u32>,
+    shadow_map: Option<super::shadows::ShadowMap>,
+
     /// `add`'s scratch: the vertices' depths
     zs: Vec<f32>,
 }
@@ -341,16 +352,7 @@ impl Local {
             let vao = gl.create_vertex_array().expect("GL vertex array");
             gl.bind_vertex_array(Some(vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            for (loc, n, off) in [(0, 2, 0), (1, 4, 8), (2, 2, 24), (3, 4, 32)] {
-                gl.enable_vertex_attrib_array(loc);
-                gl.vertex_attrib_pointer_f32(loc, n, glow::FLOAT, false, 4 * VERTEX as i32, off);
-            }
-            gl.enable_vertex_attrib_array(4);
-            gl.vertex_attrib_pointer_i32(4, 4, glow::UNSIGNED_INT, 4 * VERTEX as i32, 48);
-            gl.enable_vertex_attrib_array(5);
-            gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, 4 * VERTEX as i32, 64);
-            gl.enable_vertex_attrib_array(6);
-            gl.vertex_attrib_pointer_f32(6, 1, glow::FLOAT, false, 4 * VERTEX as i32, 80);
+            vertex_layout(gl);
             let fbo = || gl.create_framebuffer().expect("GL framebuffer");
             Local { vao, copy_vao: gl.create_vertex_array().expect("GL vertex array"), mip: [fbo(), fbo()], fbos: HashMap::new() }
         }
@@ -365,6 +367,22 @@ impl Local {
                 gl.delete_framebuffer(f);
             }
         }
+    }
+}
+
+/// The batched vertices' attributes (`VERTEX` words) on the VAO and buffer bound.
+pub fn vertex_layout(gl: &glow::Context) {
+    unsafe {
+        for (loc, n, off) in [(0, 2, 0), (1, 4, 8), (2, 2, 24), (3, 4, 32)] {
+            gl.enable_vertex_attrib_array(loc);
+            gl.vertex_attrib_pointer_f32(loc, n, glow::FLOAT, false, 4 * VERTEX as i32, off);
+        }
+        gl.enable_vertex_attrib_array(4);
+        gl.vertex_attrib_pointer_i32(4, 4, glow::UNSIGNED_INT, 4 * VERTEX as i32, 48);
+        gl.enable_vertex_attrib_array(5);
+        gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, 4 * VERTEX as i32, 64);
+        gl.enable_vertex_attrib_array(6);
+        gl.vertex_attrib_pointer_f32(6, 1, glow::FLOAT, false, 4 * VERTEX as i32, 80);
     }
 }
 
@@ -560,7 +578,7 @@ void main() {
 "#;
 
 /// Words per batched vertex.
-const VERTEX: usize = 21;
+pub const VERTEX: usize = 21;
 
 /// The shaders' uniforms, looked up once.
 struct Uniforms {
@@ -753,6 +771,9 @@ impl Glide {
                 },
                 alpha_test: (7, 0),
                 batch: Vec::new(),
+                cast_only: false,
+                no_cast: false,
+                no_cast_parts: Vec::new(),
                 batch_mode: glow::TRIANGLES,
                 gamma: 1.0,
                 palette,
@@ -767,6 +788,9 @@ impl Glide {
                 ssao: None,
                 lights: Vec::new(),
                 lighting: None,
+                casters: Vec::new(),
+                shadow_map: None,
+
                 zs: Vec::new(),
             };
             g.size_buffers(gl);
@@ -819,6 +843,12 @@ impl Glide {
     }
 
     /// The view's rectangle in the target (x, y from the top, w, h) and the columns it is cut to.
+    /// Game pixels to target pixels for the 3D picture (`ao::Map`).
+    fn full_map(&self) -> super::ao::Map {
+        let (tw, th) = (self.target.0 as f32, self.target.1 as f32);
+        [0.0, 0.0, tw / self.space.0 as f32, th / self.space.1 as f32]
+    }
+
     fn view_rect(&self) -> ([f32; 4], (f32, f32)) {
         let (tw, th) = (self.target.0 as f32, self.target.1 as f32);
         let w43 = (th * 4.0 / 3.0).min(tw);
@@ -1065,11 +1095,24 @@ impl Glide {
         let Some(out) = self.colour_fbo(gl) else { return };
         let d = self.gdepth.as_ref().unwrap();
         let (tex, ms) = (d.tex, d.samples.is_some());
-        let (target, space) = (self.target, self.space);
-        if super::ao::enabled() && super::ao::debug_view() != 3 {
-            self.ssao.get_or_insert_with(|| super::ao::Ssao::new(gl)).run(gl, tex, ms, target, space, out);
+        let (target, map) = (self.target, self.full_map());
+        // the AO and the sun's shadow (`NSTRIKE_GBUFFER=lights`: neither, `=shadows`: no AO)
+        let view = super::ao::debug_view();
+        let ao = super::ao::enabled() && view != 3 && view != 4;
+        let casters = std::mem::take(&mut self.casters);
+        let sun = match (super::shadows::enabled() && view != 3, super::ao::sun(), super::ao::camera(target, map)) {
+            (true, Some(sun), Some(cam)) => {
+                let textures = (self.array, self.alpha);
+                self.shadow_map.get_or_insert_with(|| super::shadows::ShadowMap::new(gl)).render(gl, &casters, sun, cam, map, target.1 as f32, textures)
+            }
+            _ => None,
+        };
+        self.casters = casters;
+        self.casters.clear();
+        if ao || sun.is_some() {
+            self.ssao.get_or_insert_with(|| super::ao::Ssao::new(gl)).run(gl, tex, ms, target, map, out, ao, sun.as_ref());
         }
-        if let (true, Some(cam)) = (super::lights::enabled(), super::ao::camera(target, space)) {
+        if let (true, Some(cam)) = (super::lights::enabled(), super::ao::camera(target, map)) {
             self.lighting.get_or_insert_with(|| super::lights::Lighting::new(gl)).run(gl, tex, ms, target, cam, out, &lights);
         }
     }
@@ -1399,6 +1442,27 @@ impl Glide {
                 false => 0,
             };
             gl.uniform_1_i32(u.gmode.as_ref(), gmode);
+            // the sun's shadow casters: triangles with depth at every corner, the chroma key in
+            // the constant colour's place (`shadows.rs`)
+            if gmode == 1 && self.batch_mode == glow::TRIANGLES && super::shadows::enabled() {
+                let key = s.key;
+                let kc = [(key >> 16 & 0xff) as f32 / 255.0, (key >> 8 & 0xff) as f32 / 255.0, (key & 0xff) as f32 / 255.0, s.chroma as u32 as f32].map(f32::to_bits);
+                let mut parts = self.no_cast_parts.iter().peekable();
+                for (i, t) in self.batch.chunks_exact(3 * VERTEX).enumerate() {
+                    let at = i * 3 * VERTEX;
+                    while parts.next_if(|p| p.1 <= at).is_some() {}
+                    if parts.peek().is_some_and(|p| p.0 <= at) {
+                        continue;
+                    }
+                    if t.chunks_exact(VERTEX).all(|v| f32::from_bits(v[20]) > 0.0) {
+                        for v in t.chunks_exact(VERTEX) {
+                            self.casters.extend_from_slice(&v[..8]);
+                            self.casters.extend(kc);
+                            self.casters.extend_from_slice(&v[12..]);
+                        }
+                    }
+                }
+            }
             match gmode {
                 1 => gl.color_mask_draw_buffer(1, true, true, false, false),
                 2 | 3 => {
@@ -1418,6 +1482,7 @@ impl Glide {
             gl.disable(glow::BLEND);
         }
         self.batch.clear();
+        self.no_cast_parts.clear();
     }
 
     /// Change the state, drawing what was batched with the old one first.
@@ -1480,8 +1545,8 @@ impl Glide {
             z.resize(verts.len(), 0.0);
         }
         // a glow of the 3D picture (additive): a dynamic light (not lines)
-        if self.gbuf && self.gdepth.is_some() && super::lights::enabled() && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
-            && let Some(cam) = super::ao::camera(self.target, self.space)
+        if self.gbuf && !self.cast_only && self.gdepth.is_some() && super::lights::enabled() && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
+            && let Some(cam) = super::ao::camera(self.target, self.full_map())
         {
             let colour = self.glow_colour(verts, st_box);
             if std::env::var_os("NSTRIKE_LIGHT_LOG").is_some() {
@@ -1495,9 +1560,9 @@ impl Glide {
                     z.iter_mut().for_each(|z| *z = d);
                 }
             }
-            let (kx, ky) = (self.target.0 as f32 / self.space.0 as f32, self.target.1 as f32 / self.space.1 as f32);
+            let [ox, oy, kx, ky] = self.full_map();
             let th = self.target.1 as f32;
-            let corners: Vec<_> = verts.iter().map(|&v| (xy(v).0 * kx, th - xy(v).1 * ky)).collect();
+            let corners: Vec<_> = verts.iter().map(|&v| (ox + xy(v).0 * kx, th - (oy + xy(v).1 * ky))).collect();
             // only the game's fire and explosions (`lights::gives_light`)
             if super::lights::gives_light()
                 && let Some(l) = super::lights::light(&corners, &z, colour, cam)
@@ -1505,6 +1570,7 @@ impl Glide {
                 self.lights.push(l);
             }
         }
+        let start = self.batch.len();
         let mut put = |v: u32, (x, y): (f32, f32), z: f32| {
             let (s, t) = st(v);
             self.batch.extend([x.to_bits(), y.to_bits(), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()]);
@@ -1526,6 +1592,39 @@ impl Glide {
             }
         }
         self.zs = z;
+        if self.cast_only {
+            self.cast(start, verts.len());
+        } else if self.no_cast {
+            self.no_cast_parts.push((start, self.batch.len()));
+        }
+    }
+
+    /// The shadows' object ring (`pictures::shadow_ring`): the primitive just batched from
+    /// `start` is not drawn; a solid one with depth at every corner is a shadow caster, its
+    /// corners taken from the zoomed-out projection back to the picture's.
+    fn cast(&mut self, start: usize, corners: usize) {
+        let new: Vec<u32> = self.batch.drain(start..).collect();
+        let (sb, db) = self.state.blend;
+        let solid = (sb, db) == (4, 0) || (sb, db) == (1, 5);
+        if !(self.gbuf && self.gdepth.is_some() && solid && corners >= 3 && super::shadows::enabled()) {
+            return;
+        }
+        let Some((cx, cy)) = super::ao::centre() else { return };
+        let g = [0, 1].map(|i| f32::from_bits(RING_ZOOM[i].load(Ordering::Relaxed)));
+        let key = self.state.key;
+        let kc = [(key >> 16 & 0xff) as f32 / 255.0, (key >> 8 & 0xff) as f32 / 255.0, (key & 0xff) as f32 / 255.0, self.state.chroma as u32 as f32].map(f32::to_bits);
+        for t in new.chunks_exact(3 * VERTEX) {
+            if !t.chunks_exact(VERTEX).all(|v| f32::from_bits(v[20]) > 0.0) {
+                continue;
+            }
+            for v in t.chunks_exact(VERTEX) {
+                let (x, y) = (f32::from_bits(v[0]), f32::from_bits(v[1]));
+                self.casters.extend([(cx + (x - cx) * g[0]).to_bits(), (cy + (y - cy) * g[1]).to_bits()]);
+                self.casters.extend_from_slice(&v[2..8]);
+                self.casters.extend(kc);
+                self.casters.extend_from_slice(&v[12..]);
+            }
+        }
     }
 
     /// A glow's colour: the local colour (the vertices' mean or the constant, by grColorCombine)
@@ -1776,6 +1875,9 @@ fn sst_win_close(_: &mut Cpu) -> u32 {
         if let Some(mut l) = g.lighting.take() {
             l.delete(gl);
         }
+        if let Some(mut m) = g.shadow_map.take() {
+            m.delete(gl);
+        }
         // this thread's own objects (other threads' cannot be deleted here)
         if let Some(l) = g.locals.remove(&std::thread::current().id()) {
             l.delete(gl);
@@ -1833,6 +1935,7 @@ fn buffer_swap(c: &mut Cpu) -> u32 {
         g.flush(gl);
         g.resolve(gl);
         g.clear_gbuffer(gl);
+        g.casters.clear();
         g.gbuf = false;
         g.posted = false;
         // the buffers trade places, as on the card: the game keeps what is under its cursor
@@ -1894,6 +1997,25 @@ pub fn set_3d(on: bool) {
             g.gbuf = false;
         }
     });
+}
+
+/// The shadows' object ring's zoom (`pictures::shadow_ring`), x and y as f32 bits.
+static RING_ZOOM: [AtomicU32; 2] = [AtomicU32::new(0x3f80_0000), AtomicU32::new(0x3f80_0000)];
+
+pub fn set_ring_zoom(g: (f32, f32)) {
+    RING_ZOOM[0].store(g.0.to_bits(), Ordering::Relaxed);
+    RING_ZOOM[1].store(g.1.to_bits(), Ordering::Relaxed);
+}
+
+/// Whether the primitives that follow only cast shadows (the ring's, drawn zoomed out).
+pub fn set_cast_only(on: bool) {
+    with(|g, _| g.cast_only = on);
+}
+
+/// Whether the primitives that follow are an object's drawn in the picture (not shadow
+/// casters: the ring draws all objects for the shadows, `pictures::shadow_ring`).
+pub fn set_no_cast(on: bool) {
+    with(|g, _| g.no_cast = on);
 }
 
 /// Where the vertices that follow go in the frame.
