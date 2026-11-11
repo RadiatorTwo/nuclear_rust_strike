@@ -71,6 +71,7 @@ enum Row {
     Wide,
     Ao,
     Lights,
+    LitSmoke,
     Shadows,
     ShadowQuality,
     Bloom,
@@ -81,7 +82,7 @@ enum Row {
 
 /// The settings page (F10) and the effects page (F11: the modern graphics effects).
 const SETTINGS: &[Row] = &[Row::Fullscreen, Row::Window, Row::FrameRate, Row::Vsync, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
-const EFFECTS: &[Row] = &[Row::Depth, Row::Ao, Row::Lights, Row::Shadows, Row::ShadowQuality, Row::Bloom, Row::Heat, Row::Close];
+const EFFECTS: &[Row] = &[Row::Depth, Row::Ao, Row::Lights, Row::LitSmoke, Row::Shadows, Row::ShadowQuality, Row::Bloom, Row::Heat, Row::Close];
 
 pub struct Menu {
     /// the page's rows: `SETTINGS` or `EFFECTS`
@@ -146,6 +147,7 @@ impl Menu {
             Row::Wide => (vec!["Off".into(), "On".into()], s.widescreen as usize),
             Row::Ao => (vec!["Off".into(), "On".into()], s.ambient_occlusion as usize),
             Row::Lights => (vec!["Off".into(), "On".into()], s.dynamic_lights as usize),
+            Row::LitSmoke => (vec!["Off".into(), "On".into()], s.lit_smoke as usize),
             Row::Shadows => (vec!["Off".into(), "On".into()], s.shadows as usize),
             Row::ShadowQuality => {
                 let all = settings::ShadowQuality::ALL;
@@ -183,6 +185,7 @@ impl Menu {
             Row::Wide => settings::update(|s| s.widescreen = k == 1),
             Row::Ao => super::ao::set_enabled(k == 1),
             Row::Lights => super::lights::set_enabled(k == 1),
+            Row::LitSmoke => super::lights::set_smoke(k == 1),
             Row::Shadows => super::shadows::set_enabled(k == 1),
             Row::ShadowQuality => super::shadows::set_quality(settings::ShadowQuality::ALL[k]),
             Row::Bloom => super::bloom::set_enabled(k == 1),
@@ -278,6 +281,7 @@ impl Menu {
                 Row::Wide => "Widescreen",
                 Row::Ao => "Ambient occlusion",
                 Row::Lights => "Dynamic lights",
+                Row::LitSmoke => "Lit smoke",
                 Row::Shadows => "Shadows",
                 Row::ShadowQuality => "Shadow quality",
                 Row::Bloom => "Bloom",
@@ -300,6 +304,7 @@ impl Menu {
             Row::Wide => "Missions as wide as the window, HUD in the middle",
             Row::Ao => "Corners and the ground under things darker",
             Row::Lights => "Muzzle flashes and explosions light what is near",
+            Row::LitSmoke => "Smoke near fire takes its light (with dynamic lights)",
             Row::Shadows => "The sun casts shadows from what is on screen",
             Row::Bloom => "A soft glow around fire and explosions",
             Row::Heat => "The air wavers above fire and explosions",

@@ -84,11 +84,13 @@ pub struct Settings {
     pub heat_shimmer: bool,
     /// a depth buffer for the 3D picture: no triangles in front that lie behind (`platform::zbuffer`)
     pub depth_buffer: bool,
+    /// smoke is tinted by the dynamic lights near it (`platform::lights`; only with them on)
+    pub lit_smoke: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid, bloom: true, heat_shimmer: true, depth_buffer: true }
+        Settings { window: None, fullscreen: false, frame_rate: FrameRate::Display, vsync: true, msaa: 4, texture_filter: 16, widescreen: true, ambient_occlusion: true, dynamic_lights: true, shadows: true, shadow_quality: ShadowQuality::Mid, bloom: true, heat_shimmer: true, depth_buffer: true, lit_smoke: true }
     }
 }
 
@@ -152,6 +154,9 @@ pub fn get() -> Settings {
     }
     if let Some(v) = env("NSTRIKE_ZBUFFER") {
         s.depth_buffer = v == "1";
+    }
+    if let Some(v) = env("NSTRIKE_LIT_SMOKE") {
+        s.lit_smoke = v == "1";
     }
     if let Some(v) = env("NSTRIKE_HEAT") {
         s.heat_shimmer = v == "1";
@@ -225,6 +230,7 @@ pub fn parse(text: &str, mut warn: impl FnMut(String)) -> Settings {
             "bloom" => v.parse().ok().map(|b| s.bloom = b),
             "heat_shimmer" => v.parse().ok().map(|b| s.heat_shimmer = b),
             "depth_buffer" => v.parse().ok().map(|b| s.depth_buffer = b),
+            "lit_smoke" => v.parse().ok().map(|b| s.lit_smoke = b),
             _ => {
                 warn(format!("line {}: unknown setting `{key}`", n + 1));
                 continue;
@@ -301,7 +307,11 @@ pub fn render(s: &Settings) -> String {
          \n\
          # Depth buffer: no triangles drawn in front of nearer ones (the game sorts by itself,\n\
          # with mistakes): true or false.\n\
-         depth_buffer = {}\n",
+         depth_buffer = {}\n\
+         \n\
+         # Lit smoke: smoke near fire and explosions takes their light (only with the dynamic\n\
+         # lights on): true or false.\n\
+         lit_smoke = {}\n",
         s.fullscreen,
         s.vsync,
         list(MSAA_CHOICES),
@@ -315,6 +325,7 @@ pub fn render(s: &Settings) -> String {
         s.shadow_quality.name(),
         s.bloom,
         s.heat_shimmer,
-        s.depth_buffer
+        s.depth_buffer,
+        s.lit_smoke
     )
 }

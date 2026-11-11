@@ -23,16 +23,36 @@
 //! Setting `dynamic_lights` (F11), `NSTRIKE_LIGHTS=0/1`; `NSTRIKE_GBUFFER=lights` shows the
 //! light alone; tuning `NSTRIKE_LIGHT_STRENGTH`, `NSTRIKE_LIGHT_REACH`; `NSTRIKE_LIGHT_PYROS`
 //! (hex list) replaces `LIGHT_PYROS`, `NSTRIKE_LIGHT_LOG=1` logs the glows by sequence.
+//!
+//! Lit smoke (as future_rust_cop's): the game's smoke and dust (pyro sequences in
+//! `SMOKE_PYROS`) is additive, so lit means tinted. Each smoke primitive is coloured by
+//! 1 + `SMOKE_STRENGTH` times the light reaching its centre (`smoke_tint`): from the merged
+//! lights of the last picture (a picture late), by distance, and half as much from lights
+//! behind it a little aside (light shining through). Setting `lit_smoke` (F11,
+//! `NSTRIKE_LIT_SMOKE`), only with the lights on; tuning `NSTRIKE_SMOKE_STRENGTH`.
 
 use super::ao;
 use glow::HasContext;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static SMOKE: AtomicBool = AtomicBool::new(false);
 
-/// At start: the setting.
+/// At start: the settings.
 pub fn init() {
     ENABLED.store(crate::settings::get().dynamic_lights, Relaxed);
+    SMOKE.store(crate::settings::get().lit_smoke, Relaxed);
+}
+
+/// Lit smoke: on, and the lights too.
+pub fn smoke_enabled() -> bool {
+    SMOKE.load(Relaxed) && enabled()
+}
+
+/// The F11 menu: saved, used from the next picture on.
+pub fn set_smoke(on: bool) {
+    crate::settings::update(|s| s.lit_smoke = on);
+    SMOKE.store(on, Relaxed);
 }
 
 pub fn enabled() -> bool {
@@ -100,6 +120,15 @@ pub fn gives_light() -> bool {
     s >> 31 == 1 && list.contains(&(s & 0x7fff_ffff))
 }
 
+/// The pyro sequences of smoke and dust (lit smoke).
+const SMOKE_PYROS: &[u32] = &[0x18, 0x19];
+
+/// The primitive drawn now is smoke: a pyro of a sequence in `SMOKE_PYROS`.
+pub fn is_smoke() -> bool {
+    let s = source();
+    s >> 31 == 1 && SMOKE_PYROS.contains(&(s & 0x7fff_ffff))
+}
+
 /// `NSTRIKE_LIGHT_LOG=1`: the glows (additive primitives) by where they were made (1 << 31 | a pyro
 /// sequence), with their mean colour, every 2 s.
 pub fn log_source(colour: [f32; 3]) {
@@ -147,8 +176,18 @@ pub struct Light {
 /// A light from a glowing primitive: its corners (target pixels from the bottom left) and z
 /// (0 unknown), its colour; `cam` the camera (`ao::camera`: focal x, y and centre).
 pub fn light(corners: &[(f32, f32)], z: &[f32], colour: [f32; 3], cam: ((f32, f32), (f32, f32))) -> Option<Light> {
+    if colour.iter().all(|&c| c < 0.02) {
+        return None;
+    }
+    let (at, size) = place(corners, z, cam)?;
+    Some(Light { at, colour, size })
+}
+
+/// A primitive's centre in view space and its size in the world (as `light` takes them);
+/// none without a depth at any corner.
+fn place(corners: &[(f32, f32)], z: &[f32], cam: ((f32, f32), (f32, f32))) -> Option<([f32; 3], f32)> {
     let (n, sum) = z.iter().filter(|&&z| z > 0.0).fold((0, 0.0), |a, &z| (a.0 + 1, a.1 + z));
-    if n == 0 || colour.iter().all(|&c| c < 0.02) {
+    if n == 0 {
         return None;
     }
     let z = sum / n as f32;
@@ -159,7 +198,34 @@ pub fn light(corners: &[(f32, f32)], z: &[f32], colour: [f32; 3], cam: ((f32, f3
     let (y0, y1) = corners.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
     let ((fx, fy), (cx, cy)) = cam;
     let size = (((x1 - x0) * z / fx).hypot((y1 - y0) * z / fy)).max(1.0);
-    Some(Light { at: [(c.0 - cx) * z / fx, (c.1 - cy) * z / fy, z], colour, size })
+    Some(([(c.0 - cx) * z / fx, (c.1 - cy) * z / fy, z], size))
+}
+
+/// Smoke times 1 + this much of the light reaching it.
+const SMOKE_STRENGTH: f32 = 3.0;
+
+/// A smoke primitive's colour factor (rgb): 1 + the light at its centre from `lights` (the
+/// last picture's, merged), by distance, plus half of that of lights behind it within 1.5
+/// reach aside.
+pub fn smoke_tint(corners: &[(f32, f32)], z: &[f32], cam: ((f32, f32), (f32, f32)), lights: &[Merged]) -> [f32; 3] {
+    let Some((p, _)) = place(corners, z, cam) else { return [1.0; 3] };
+    let mut sum = [0.0f32; 3];
+    for (at, r, col) in lights {
+        let d = [at[0] - p[0], at[1] - p[1], at[2] - p[2]];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let a = if dist < *r {
+            (1.0 - dist / r).powi(2)
+        } else {
+            // behind, seen through the smoke
+            let aside = d[0].hypot(d[1]);
+            if d[2] > 0.0 && aside < 1.5 * r { 0.5 * (1.0 - aside / (1.5 * r)).powi(2) } else { 0.0 }
+        };
+        for i in 0..3 {
+            sum[i] += col[i] * a;
+        }
+    }
+    let k = ao::tune("NSTRIKE_SMOKE_STRENGTH", SMOKE_STRENGTH);
+    sum.map(|s| 1.0 + k * s.min(1.5))
 }
 
 /// A light as the shader takes it: place (pulled toward the camera by a fifth of its reach:
@@ -180,7 +246,10 @@ fn view(l: &Light) -> ([f32; 3], f32, [f32; 3]) {
 
 /// Lights near each other and of a like colour as one (summed colour, their place weighed by
 /// it), the strongest `MAX` (by colour times reach).
-fn merge(lights: &[Light]) -> Vec<([f32; 3], f32, [f32; 3])> {
+/// A merged light: place (view space), reach, colour times strength.
+pub type Merged = ([f32; 3], f32, [f32; 3]);
+
+pub fn merge(lights: &[Light]) -> Vec<Merged> {
     let mut v: Vec<_> = lights.iter().map(view).collect();
     let power = |l: &([f32; 3], f32, [f32; 3])| (l.2[0] + l.2[1] + l.2[2]) * l.1;
     v.sort_by(|a, b| power(b).total_cmp(&power(a)));
@@ -273,17 +342,17 @@ impl Lighting {
 
     /// The lights over the 3D picture: `depth` the attachment, `target` its size, `cam` the
     /// camera in target pixels, `out` a framebuffer with only the picture's colour.
-    pub fn run(&mut self, gl: &glow::Context, depth: glow::Texture, ms: bool, target: (u32, u32), cam: ((f32, f32), (f32, f32)), out: glow::Framebuffer, lights: &[Light]) {
+    /// `merged` the picture's lights (`merge`).
+    pub fn run(&mut self, gl: &glow::Context, depth: glow::Texture, ms: bool, target: (u32, u32), cam: ((f32, f32), (f32, f32)), out: glow::Framebuffer, merged: &[Merged]) {
         // the bloom alone (5): the picture as usual before it
         let show = match ao::debug_view() {
             5 => 0,
             v => v,
         };
-        if lights.is_empty() && show != 3 || matches!(show, 1 | 2 | 4) {
+        if merged.is_empty() && show != 3 || matches!(show, 1 | 2 | 4) {
             return;
         }
         let (w, h) = (target.0 as i32, target.1 as i32);
-        let merged = merge(lights);
         let pos: Vec<f32> = merged.iter().flat_map(|l| [l.0[0], l.0[1], l.0[2], l.1]).collect();
         let col: Vec<f32> = merged.iter().flat_map(|l| l.2).collect();
         let ((fx, fy), (cx, cy)) = cam;

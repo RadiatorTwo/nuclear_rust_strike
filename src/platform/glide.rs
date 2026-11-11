@@ -241,6 +241,8 @@ struct Glide {
     /// dynamic lights (`lights.rs`): this picture's glows, and the pass
     lights: Vec<super::lights::Light>,
     lighting: Option<super::lights::Lighting>,
+    /// the last picture's lights, merged: they tint this picture's smoke (lit smoke)
+    smoke_lights: Vec<super::lights::Merged>,
     /// the sun's shadow (`shadows.rs`): this picture's casters (batched vertices), the map
     casters: Vec<u32>,
     shadow_map: Option<super::shadows::ShadowMap>,
@@ -391,6 +393,8 @@ pub fn vertex_layout(gl: &glow::Context) {
         gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, 4 * VERTEX as i32, 64);
         gl.enable_vertex_attrib_array(6);
         gl.vertex_attrib_pointer_f32(6, 1, glow::FLOAT, false, 4 * VERTEX as i32, 80);
+        gl.enable_vertex_attrib_array(7);
+        gl.vertex_attrib_pointer_f32(7, 3, glow::FLOAT, false, 4 * VERTEX as i32, 84);
     }
 }
 
@@ -405,7 +409,9 @@ layout(location = 3) in vec4 kc;
 layout(location = 4) in uvec4 mode;
 layout(location = 5) in vec4 box;
 layout(location = 6) in float z;
+layout(location = 7) in vec3 tint;
 out vec4 vcol;
+flat out vec3 vtint;
 noperspective out float vinvz;
 noperspective out vec2 st;
 flat out vec4 konst;
@@ -413,6 +419,7 @@ flat out uvec4 vmode;
 flat out vec4 st_box;
 void main() {
     vcol = col / 255.0;
+    vtint = tint;
     konst = kc;
     st_box = box;
     vmode = mode;
@@ -440,6 +447,7 @@ noperspective in vec2 st;
 flat in vec4 konst;    // the constant colour
 flat in uvec4 vmode;   // combine units and texture, packed by `add`
 flat in vec4 st_box;   // the primitive's texture rectangle
+flat in vec3 vtint;    // lit smoke: the light reaching it (1 elsewhere)
 layout(location = 0) out vec4 color;
 layout(location = 1) out vec4 gbuf;
 
@@ -583,14 +591,14 @@ void main() {
     if (edge == 2) a *= cover;
     if (edge == 3) c *= cover;
     if (cover <= 0.0) discard;
-    color = vec4(c, a);
+    color = vec4(c * vtint, a);
     if (gmode == 1) gbuf = vec4(vinvz > 0.0 ? 1.0 / vinvz : 0.0, 0.0, 0.0, step(0.5, a));
     else gbuf = vec4(0.0, clamp(2.0 * (gmode == 3 ? max(c.r, max(c.g, c.b)) : a), 0.0, 1.0), 0.0, 0.0);
 }
 "#;
 
 /// Words per batched vertex.
-pub const VERTEX: usize = 21;
+pub const VERTEX: usize = 24;
 
 /// The shaders' uniforms, looked up once.
 struct Uniforms {
@@ -803,6 +811,7 @@ impl Glide {
                 ssao: None,
                 lights: Vec::new(),
                 lighting: None,
+                smoke_lights: Vec::new(),
                 casters: Vec::new(),
                 shadow_map: None,
                 bloom: None,
@@ -1122,6 +1131,7 @@ impl Glide {
         self.gbuf = false;
         self.posted = true;
         let lights = std::mem::take(&mut self.lights);
+        self.smoke_lights.clear();
         let heat_sources = std::mem::take(&mut self.heat_sources);
         let Some(out) = self.colour_fbo(gl) else { return };
         let d = self.gdepth.as_ref().unwrap();
@@ -1144,7 +1154,9 @@ impl Glide {
             self.ssao.get_or_insert_with(|| super::ao::Ssao::new(gl)).run(gl, tex, ms, target, map, out, ao, sun.as_ref());
         }
         if let (true, Some(cam)) = (super::lights::enabled(), super::ao::camera(target, map)) {
-            self.lighting.get_or_insert_with(|| super::lights::Lighting::new(gl)).run(gl, tex, ms, target, cam, out, &lights);
+            let merged = super::lights::merge(&lights);
+            self.lighting.get_or_insert_with(|| super::lights::Lighting::new(gl)).run(gl, tex, ms, target, cam, out, &merged);
+            self.smoke_lights = merged;
         }
         if let (true, Some((focal, _))) = (super::heat::enabled(), super::ao::camera(target, map)) {
             let clip = [0, 0, target.0 as i32, target.1 as i32];
@@ -1594,7 +1606,8 @@ impl Glide {
             z.clear();
             z.resize(verts.len(), 0.0);
         }
-        // a glow of the 3D picture (additive): a dynamic light (not lines)
+        // a glow of the 3D picture (additive): a dynamic light (not lines), or smoke tinted by them
+        let mut tint = [1.0f32; 3];
         if self.gbuf && !self.cast_only && self.gdepth.is_some() && (super::lights::enabled() || super::heat::enabled()) && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
             && let Some(cam) = super::ao::camera(self.target, self.full_map())
         {
@@ -1613,6 +1626,9 @@ impl Glide {
             let [ox, oy, kx, ky] = self.full_map();
             let th = self.target.1 as f32;
             let corners: Vec<_> = verts.iter().map(|&v| (ox + xy(v).0 * kx, th - (oy + xy(v).1 * ky))).collect();
+            if super::lights::smoke_enabled() && super::lights::is_smoke() {
+                tint = super::lights::smoke_tint(&corners, &z, cam, &self.smoke_lights);
+            }
             // only the game's fire and explosions (`lights::gives_light`)
             if super::lights::gives_light() {
                 if super::lights::enabled()
@@ -1642,6 +1658,7 @@ impl Glide {
             self.batch.extend(mode);
             self.batch.extend(b);
             self.batch.push(z.to_bits());
+            self.batch.extend(tint.map(f32::to_bits));
         };
         if let (Some([n0, n1, n2, n3]), &[v0, v1]) = (quad, verts) {
             put(v0, n0, z[0]);

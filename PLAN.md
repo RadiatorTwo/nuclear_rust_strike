@@ -149,7 +149,14 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [x] Depth buffer (2026-11-11, `zbuffer.rs`): the game's ordering table put single triangles
       behind other geometry in front; 3D primitives with depth at their corners are tested
       (solid ones write). Setting `depth_buffer` (F11). Open: the user's look (decals, sprites)
-- [ ] Next: particles, smoke (FCop's `effects.rs`; the pyro sequences tell the effects apart)
+- [x] Step 6, lit smoke (2026-11-11, `lights.rs`, as FCop's): the smoke and dust pyros (0x18,
+      0x19, additive) times 1 + 3 * the light at their centre from the last picture's merged
+      lights (by distance; half from lights behind, aside within 1.5 reach), per primitive (a
+      vertex attribute `tint`). Setting `lit_smoke` (F11), only with the lights on;
+      `NSTRIKE_SMOKE_STRENGTH`. Open: the user's look
+- [ ] Next: our own particles (sparks, debris, smoke) at the game's explosions. Needs the
+      pyro's place, speed and age (reverse engineering pyroCreate_ and the pyro record);
+      simulated per logic frame, drawn as sprites with the depth buffer
 
 ### 4. Later
 - [x] Videos (`videos.res`)

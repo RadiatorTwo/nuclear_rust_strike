@@ -358,6 +358,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   the lights off), size capped at `MAX_SIZE` 1200 units; the picture copied and read a few
   pixels off near them (waves rising), not where the pixel's geometry is in front of the
   source. Setting `heat_shimmer` (F11, `NSTRIKE_HEAT`), `NSTRIKE_HEAT_AMPLITUDE`.
+- Lit smoke (`lights.rs`): smoke pyros (`SMOKE_PYROS` 0x18/0x19, additive) are tinted per
+  primitive in `glide`'s `add` (`lights::smoke_tint`, vertex attribute 7 `tint`, VERTEX 24
+  words) by the last picture's merged lights (`Glide::smoke_lights`, set in `post_3d`).
+  Setting `lit_smoke` (F11, `NSTRIKE_LIT_SMOKE`), only with the lights on;
+  `NSTRIKE_SMOKE_STRENGTH` (3.0).
 - `src/platform/zbuffer.rs` (new): a depth buffer for the 3D picture (the game's ordering
   table sorts with mistakes: triangles behind others came out in front). A DEPTH_COMPONENT32F
   renderbuffer in `Gdepth` beside the depth attachment (same samples, attached and cleared
