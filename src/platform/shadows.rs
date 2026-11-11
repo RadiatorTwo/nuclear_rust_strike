@@ -124,6 +124,22 @@ pub fn model_face(c: &mut crate::rt::Cpu) {
     m.wr8(face, was);
 }
 
+/// Actor3D_RenderShadow_(model, matrix, position, darkness, ...; 3 dwords on the stack): the
+/// game's own shadow of a model, flattened onto the ground, called by 0x431914 per object
+/// with one: in mission 1 only the helicopter (and in the shadows' ring, as a caster).
+pub const RENDER_SHADOW: u32 = 0x412cf8;
+
+/// The game's model shadows are left out while ours are on (they lay twice under the
+/// helicopter).
+pub fn render_shadow(c: &mut crate::rt::Cpu) {
+    if !enabled() {
+        return crate::rt::call_original(c, RENDER_SHADOW);
+    }
+    // ret 0Ch (its caller does not use the result)
+    c.r[crate::rt::EAX] = 0;
+    c.r[crate::rt::ESP] += 4 + 12;
+}
+
 /// How dark a shadow is (0...1).
 pub const STRENGTH: f32 = 0.5;
 

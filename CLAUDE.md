@@ -198,7 +198,13 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   gl_RenderPoly_'s renderers of poly types 8 and 9. Tried (2026-11-11, no gain, not kept): the 0xc7f
   versions over single-entry regions with forward branches (their clamps fcomp, fnstsw,
   sahf, jae cut the straight runs short): the renderers' cost is their size (~50 KB of
-  machine code each, the memory base spilled and reloaded at every access), not the rounding. Left: GL driver ~20% (flush ~8%: data
+  machine code each, the memory base spilled and reloaded at every access), not the rounding.
+  Then (2026-11-11, ~249 -> ~276 fps): the guest memory is reserved at `rt::FIXED_BASE`
+  0x7fff0000 (below 2 GB, above the shared user data page) by `platform::reserve_memory`
+  before compiling; the lifter takes the base as a constant (`lift::FIXED_BASE`, in the
+  cache key), folded into each access's displacement: no register, no reload from the stack.
+  If the place is taken, the base is read from `Cpu::mem` as before (logged); the tests
+  reserve memory per guest and keep that path. Left: GL driver ~20% (flush ~8%: data
   2%, draw 2%, state), `Glide::add` with the depth lookup ~12%. Our own code
   symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
   dir) and `NSTRIKE_SAMPLE_RAW`.
@@ -371,7 +377,8 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   (0x411ca4, called by Actor3D_Render_ per face: normal against the view direction, unless the
   face's first byte says two-sided): in the ring every face is two-sided while it is drawn
   (`shadows::model_face`; ring faces made 57% -> 99%; the far side of the start boat cast
-  nothing). Lists (rows `[0x51b65c]..[0x51b654]`,
+  nothing). The game's own flattened model shadow (Actor3D_RenderShadow_ 0x412cf8, called by
+  0x431914; in mission 1 only the helicopter's) is skipped while ours are on (hooked). Lists (rows `[0x51b65c]..[0x51b654]`,
   columns `[0x51b658]..[0x51b650]`, lists at 0x507e50 + row 0x600 + column 0x18; a tile is
   2048 units) with the projection zoomed out by 2 (`wide::zoom_out`, y scale `[0x568af4]`,
   margin `[0x568afc]`, bound `[0x568b04]`), objects put back afterwards (`in_picture`); their
