@@ -132,7 +132,14 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   logic frame the loop's drawing runs alone (`picture`: disp_FrameChange_ with the loop's
   argument, terrain, the visible tiles' and the high-rate list's objects, HUD,
   Order_DrawOT_); afterwards the static data (0x4d0000..0x56c200) and the drawn objects'
-  memory are put back (not SSMem's heap lists 0x4e8454.., 0x51d990..: their records live
+  memory are put back; an object's matrix turns by quaternion between the two frames, its
+  columns' lengths (the game's matrices are rotations scaled along the model's axes, 0.97..1.03)
+  interpolated apart (2026-11-12: as a rotation, objects turning drew 1-2% smaller between
+  frames; rows made 1 long turned them a little); a picture draws an object from the place
+  noted at its frame's first drawing (the boat's draw turns its own matrix: drawn from memory
+  again, at the newest frame, it turned twice; left, the game's own: the start boat's matrix
+  grows 1.021 -> 1.032 rocking and jumps back every ~5 s, ~1% smaller at one angle; its writer
+  not found yet) (not SSMem's heap lists 0x4e8454.., 0x51d990..: their records live
   elsewhere, putting them back broke the heap); the terrain draws from its data as before the
   frame's own drawing. While a picture draws, the game thread keeps the turn (`hold_turn`:
   the audio timer's changes were undone, sounds went missing). `NSTRIKE_FPS=1` also logs

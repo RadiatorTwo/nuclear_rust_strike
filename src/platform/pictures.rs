@@ -337,15 +337,18 @@ fn view(c: &mut Cpu) -> Option<Vec<u8>> {
     let s = state();
     let alpha = s.alpha?;
     let h = s.cam?;
-    let prev = h.prev?;
+    // also at the newest frame (alpha 256) and without the frame before: the camera made as
+    // ours, not the game's (that one differs a little: things near it drew ~0.7% smaller
+    // and shifted in such pictures, a flicker standing still)
+    let alpha = alpha.min(256);
+    let mut prev = h.prev.unwrap_or(h.cur);
     if let Some((f, a, v)) = &s.view {
         if *f == h.frame && *a == alpha {
             return Some(v.clone());
         }
     }
-    let jump = (0..3).any(|i| (h.cur.pos[i] as i64 - prev.pos[i] as i64).abs() > JUMP);
-    if jump || alpha >= 256 {
-        return None;
+    if (0..3).any(|i| (h.cur.pos[i] as i64 - prev.pos[i] as i64).abs() > JUMP) {
+        prev = h.cur;
     }
     drop(s);
     // The angles from StrkCam_Update_'s own, finer than the whole 1/4096 turns the logic's
@@ -444,9 +447,21 @@ fn matrix(p: &Place) -> [f64; 9] {
     std::array::from_fn(|k| i16::from_le_bytes([p[12 + 2 * k], p[13 + 2 * k]]) as f64 / 4096.0)
 }
 
-/// Whether a matrix is a rotation (rows of length 1, within the 4.12 format's error).
-fn rotation(m: &[f64; 9]) -> bool {
-    (0..3).all(|r| ((m[3 * r] * m[3 * r] + m[3 * r + 1] * m[3 * r + 1] + m[3 * r + 2] * m[3 * r + 2]).sqrt() - 1.0).abs() < 0.02)
+/// The lengths of a matrix's columns (the model's axes).
+fn column_lengths(m: &[f64; 9]) -> [f64; 3] {
+    std::array::from_fn(|c| (m[c] * m[c] + m[3 + c] * m[3 + c] + m[6 + c] * m[6 + c]).sqrt())
+}
+
+fn unit_columns(m: &[f64; 9], l: &[f64; 3]) -> [f64; 9] {
+    std::array::from_fn(|k| m[k] / l[k % 3].max(1e-9))
+}
+
+/// Whether a matrix of unit columns is a rotation: columns at right angles (within the 4.12
+/// format's error) and not mirrored.
+fn orthogonal(u: &[f64; 9]) -> bool {
+    let dot = |c: usize, d: usize| (0..3).map(|i| u[3 * i + c] * u[3 * i + d]).sum::<f64>().abs();
+    let det = u[0] * (u[4] * u[8] - u[5] * u[7]) - u[1] * (u[3] * u[8] - u[5] * u[6]) + u[2] * (u[3] * u[7] - u[4] * u[6]);
+    dot(0, 1) < 0.03 && dot(0, 2) < 0.03 && dot(1, 2) < 0.03 && det > 0.0
 }
 
 /// A rotation matrix's quaternion (w, x, y, z).
@@ -501,15 +516,24 @@ fn mix(a: &Place, b: &Place, alpha: u32) -> Option<Place> {
         out[4 * k..4 * k + 4].copy_from_slice(&v.to_le_bytes());
     }
     let (ma, mb) = (matrix(a), matrix(b));
-    if ma != mb && !(rotation(&ma) && rotation(&mb)) {
-        // scaled (an explosion growing): element by element
+    if ma == mb {
+        return Some(out);
+    }
+    // the game's matrices are rotations scaled along the model's axes: columns ~0.97..1.03
+    // long, each its own. The rotation is taken from the columns made 1 long and their
+    // lengths put back afterwards (as a rotation, a picture between two frames drew the
+    // object 1-2% smaller; rows made 1 long, turned a little: a boat rocking flickered)
+    let (la, lb) = (column_lengths(&ma), column_lengths(&mb));
+    let (ua, ub) = (unit_columns(&ma, &la), unit_columns(&mb, &lb));
+    if !(orthogonal(&ua) && orthogonal(&ub)) {
+        // not a rotation scaled: element by element
         for k in 0..9 {
             let o = 12 + 2 * k;
             let (x, y) = (i16::from_le_bytes([a[o], a[o + 1]]), i16::from_le_bytes([b[o], b[o + 1]]));
             out[o..o + 2].copy_from_slice(&(lerp(x as i64, y as i64, alpha) as i16).to_le_bytes());
         }
-    } else if ma != mb {
-        let (qa, mut qb) = (quat(&ma), quat(&mb));
+    } else {
+        let (qa, mut qb) = (quat(&ua), quat(&ub));
         let mut dot: f64 = (0..4).map(|i| qa[i] * qb[i]).sum();
         if dot < 0.0 {
             qb = qb.map(|v| -v);
@@ -523,7 +547,8 @@ fn mix(a: &Place, b: &Place, alpha: u32) -> Option<Place> {
         let n = q.iter().map(|v| v * v).sum::<f64>().sqrt();
         let m = from_quat(q.map(|v| v / n));
         for k in 0..9 {
-            let v = (m[k] * 4096.0).round().clamp(-32768.0, 32767.0) as i16;
+            let l = la[k % 3] + (lb[k % 3] - la[k % 3]) * t;
+            let v = (m[k] * l * 4096.0).round().clamp(-32768.0, 32767.0) as i16;
             out[12 + 2 * k..14 + 2 * k].copy_from_slice(&v.to_le_bytes());
         }
     }
@@ -546,11 +571,24 @@ pub fn draw_obj(c: &mut Cpu) {
         for &o in &nodes {
             let cur: Place = m.slice(o + PLACE, PLACE_LEN).try_into().unwrap();
             let class = m.rd32(o);
+            // the place noted at the frame's first drawing only: drawing changes some (the
+            // boat's draw turns its own matrix), drawn again from there the change came twice
+            // (pictures at the newest frame drew the boat turned and smaller: a flicker)
             let e = s.objs.get_mut(&o).filter(|e| e.0 == class).map(|e| &mut e.1);
-            let h = Hist::note(e, f, cur);
-            s.objs.insert(o, (class, h));
-            if let (Some(a), Some(prev)) = (alpha.filter(|&a| a < 256), h.prev) {
-                if let Some(p) = mix(&prev, &cur, a) {
+            let h = match e {
+                Some(h) if h.frame == f => *h,
+                e => {
+                    let h = Hist::note(e, f, cur);
+                    s.objs.insert(o, (class, h));
+                    h
+                }
+            };
+            if let Some(a) = alpha {
+                let p = match h.prev {
+                    Some(prev) if a < 256 => mix(&prev, &h.cur, a).unwrap_or(h.cur),
+                    _ => h.cur,
+                };
+                if p != cur {
                     put.push((o, cur, p));
                 }
             }
