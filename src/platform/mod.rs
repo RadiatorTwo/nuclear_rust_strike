@@ -28,6 +28,7 @@ pub mod miles;
 pub mod misc;
 pub mod pictures;
 pub mod projection;
+pub mod render;
 pub mod sample;
 pub mod text;
 pub mod user32;
@@ -954,6 +955,8 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (shadows::MODEL_FACE, shadows::model_face),
     (shadows::RENDER_SHADOW, shadows::render_shadow),
     (ao::PROJECT_MODEL, ao::project_model),
+    (render::GREY_QUAD, render::grey_quad),
+    (render::SHADED_QUAD, render::shaded_quad),
 ];
 
 /// SelectorFromLinearAddress_(eax linear address, ...): Watcom's helper makes an LDT selector

@@ -215,6 +215,15 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   2%, draw 2%, state), `Glide::add` with the depth lookup ~12%. Our own code
   symbolised: `cargo rustc --release --bin nstrike -- -C link-arg=/MAP:<file>` (own target
   dir) and `NSTRIKE_SAMPLE_RAW`.
+  Then (2026-11-12, ~316 -> ~381 fps): gl_RenderPoly_'s renderers of poly types 8 and 9
+  (0x475314 grey quad, 0x475a34 shaded quad; ~15% of the game thread, ~500 000 quads a
+  second) run in Rust (`render.rs`): the corners into the Glide layer's GrVertex at 0x523550
+  as the FPU computes them (these run under 0x27f, not 0xc7f: a double's operation, the
+  store rounding to nearest; 0xc7f done too), the layer's state setters (0x472590...) with
+  their variables in guest memory (`[0x4ede64]`.., the other renderers use them), their
+  Glide calls under one lock (`glide::run`, `glide::Call`). A page not yet downloaded runs the
+  original. `NSTRIKE_RENDER_CHECK=1` runs both and compares vertices and variables (none
+  differ in ~6 million quads). Left: type 4 (0x473c4c) ~1.6%, Order_AddPolyToOT_ ~3%.
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
   word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's

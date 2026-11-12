@@ -2176,6 +2176,44 @@ pub fn set_view(view: View) {
     });
 }
 
+/// A Glide call made by our own code for the game's (`render.rs`), as the import does it.
+#[derive(Clone, Copy)]
+pub enum Call {
+    /// grTexFilterMode: bilinear or point
+    Filter(bool),
+    AlphaTestFunction(u32),
+    AlphaTestReference(u32),
+    /// grTexSource: the texture's start address
+    TexSource(u32),
+    ColorCombine([u32; 5]),
+    AlphaCombine([u32; 5]),
+    AlphaBlend(u32, u32),
+    Chromakey(bool),
+    ChromakeyValue(u32),
+    /// grDrawTriangle (and grAADrawTriangle): GrVertex at guest addresses
+    Triangle([u32; 3]),
+}
+
+/// The calls in order, under one lock of the Glide state (an import each locks it).
+pub fn run(calls: &[Call]) {
+    with(|g, gl| {
+        for c in calls {
+            match *c {
+                Call::Filter(linear) => g.set(gl, |s| s.linear = linear),
+                Call::AlphaTestFunction(f) => g.alpha_test.0 = f & 7,
+                Call::AlphaTestReference(v) => g.alpha_test.1 = v & 0xff,
+                Call::TexSource(addr) => g.tex = Some(addr),
+                Call::ColorCombine(v) => g.cc = v,
+                Call::AlphaCombine(v) => g.ac = v,
+                Call::AlphaBlend(a, b) => g.set(gl, |s| s.blend = (a, b)),
+                Call::Chromakey(on) => g.set(gl, |s| s.chroma = on),
+                Call::ChromakeyValue(k) => g.set(gl, |s| s.key = k),
+                Call::Triangle(v) => g.add(gl, glow::TRIANGLES, &v),
+            }
+        }
+    });
+}
+
 fn draw_triangle(c: &mut Cpu) -> u32 {
     let v = [arg(c, 0), arg(c, 1), arg(c, 2)];
     with(|g, gl| g.add(gl, glow::TRIANGLES, &v));
