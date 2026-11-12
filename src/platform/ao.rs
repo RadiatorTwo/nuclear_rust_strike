@@ -163,6 +163,25 @@ fn point(points: &mut Points, x: i16, y: i16, z: u16) {
 /// pixels: sx = x * [0x4d002c] / z * [view] + [view + 8] (at 800x600: 24000, centre 3200; a
 /// narrow camera far away).
 static CAMERA: Mutex<[f32; 4]> = Mutex::new([0.0; 4]);
+/// The same picture's view of the world (`View`).
+static VIEW: Mutex<Option<View>> = Mutex::new(None);
+
+/// How the 3D picture sees the world, from its terrain's projection: a world point p (y up)
+/// is cx = rot[0..3] . (p - cam), cy = rot[3..6] . (p - cam), cz = rot[6..9] . (p - cam)
+/// (cz the depth the projected points have), on the screen at (cx, cy) / cz * focal + centre
+/// plus the Glide layer's draw offset, in game pixels.
+#[derive(Clone, Copy)]
+pub struct View {
+    pub rot: [f32; 9],
+    pub cam: [i32; 3],
+    pub focal: (f32, f32),
+    pub centre: (f32, f32),
+}
+
+pub fn view() -> Option<View> {
+    *VIEW.lock().unwrap()
+}
+
 /// The sun of the same picture (`shadows::sun`).
 static SUN: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 
@@ -200,6 +219,16 @@ fn project(c: &mut Cpu, addr: u32) {
         let (k, v) = (f(0x4d002c), c.r[ECX]);
         *CAMERA.lock().unwrap() = [k * f(v) / 8.0, k * f(v + 4) / 8.0, f(v + 8) / 8.0, f(v + 0xc) / 8.0];
         *SUN.lock().unwrap() = super::shadows::sun();
+        // the camera's matrix (3 x 3 i16, 4096 = 1; the projection's floats are it / 8192 for
+        // terrain points in half units: their depth would be half) and place
+        let e = |i: u32| m.rd16(0x503f6a + 2 * i) as i16 as f32 / 4096.0;
+        let (ox, oy) = (m.rd32(DRAW_OFFSET) as i32 as f32 / 8.0, m.rd32(DRAW_OFFSET + 4) as i32 as f32 / 8.0);
+        *VIEW.lock().unwrap() = Some(View {
+            rot: std::array::from_fn(|i| e(i as u32)),
+            cam: [0, 4, 8].map(|o| m.rd32(0x503f54 + o) as i32),
+            focal: (k * f(v) / 8.0, k * f(v + 4) / 8.0),
+            centre: (f(v + 8) / 8.0 + ox, f(v + 0xc) / 8.0 + oy),
+        });
     }
     super::projection::run(c, addr, addr == PROJECT_MODEL);
     // one borrow for the whole list (one per point cost ~2% of the game thread)
@@ -340,7 +369,7 @@ pub fn set_enabled(on: bool) {
 
 /// The depth is made: for the AO, the dynamic lights, the shadows, the heat shimmer, the bloom (its mask) or the depth buffer.
 pub fn depth_wanted() -> bool {
-    enabled() || super::lights::enabled() || super::shadows::enabled() || super::bloom::enabled() || super::heat::enabled() || super::zbuffer::enabled()
+    enabled() || super::lights::enabled() || super::shadows::enabled() || super::bloom::enabled() || super::heat::enabled() || super::particles::enabled() || super::zbuffer::enabled()
 }
 
 /// `NSTRIKE_GBUFFER`: 0 the picture, 1 the depth, 2 the AO alone, 3 the lights alone, 4 the

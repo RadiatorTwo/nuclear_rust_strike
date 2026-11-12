@@ -453,6 +453,22 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   words) by the last picture's merged lights (`Glide::smoke_lights`, set in `post_3d`).
   Setting `lit_smoke` (F11, `NSTRIKE_LIT_SMOKE`), only with the lights on;
   `NSTRIKE_SMOKE_STRENGTH` (3.0).
+- `src/platform/particles.rs` (new, 2026-11-12): sparks and debris at the game's explosions.
+  Every pyro is made by 0x42ff50 (hooked; block at eax: +0 sequence, +4 flags, +8/+0xc/+0x10
+  place x, y up, z in 1/256 units, +0x20 size up to 0x200; it returns 0 or a value that is not
+  the object's address: reading +0x2c from it crashed). Sequences 0-7, 0x15 give particles:
+  size < 0x100 (hits) 5 sparks, else per 0x100 24 sparks and 9 debris; pyros of one frame
+  within 400 units are one; within 1500 units of an explosion of the last 45 frames one spark
+  and no debris, and they count as one (a wreck flying burning made pyros all the way: debris
+  without end). Parabolas worked out for the picture's time (`pictures::shown_frame`, logic
+  frames), not stepped; debris rests at the ground's height under the explosion
+  (Heights_GetTerrainHeight_ 0x45c4fc). Drawn by `glide`'s `post_3d` before its passes
+  (`Glide::own_quads`: GrVertex written to guest memory of ours, the depth given, `own_z`;
+  no light or heat from them). The view: the camera's matrix `[0x503f6a]` (i16 / 4096, the
+  picture's own in pictures) and place `[0x503f54]`, focal and centre from the terrain's
+  projection (`ao::view`). The terrain projection's float matrix is it / 8192 (`[0x4f3a9c]`,
+  terrain points in half units): taken first, the particles were half as deep and in front of
+  everything. Setting `particles` (F11, `NSTRIKE_PARTICLES`), `NSTRIKE_PARTICLE_LOG=1`.
 - `src/platform/zbuffer.rs` (new): a depth buffer for the 3D picture (the game's ordering
   table sorts with mistakes: triangles behind others came out in front). A DEPTH_COMPONENT32F
   renderbuffer in `Gdepth` beside the depth attachment (same samples, attached and cleared

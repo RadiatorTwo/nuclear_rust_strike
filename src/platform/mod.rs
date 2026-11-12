@@ -11,6 +11,7 @@ pub mod ao;
 pub mod lights;
 pub mod bloom;
 pub mod heat;
+pub mod particles;
 pub mod zbuffer;
 pub mod shadows;
 pub mod ddraw;
@@ -952,6 +953,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (wide::RENDER_POLY, wide::render_poly),
     (ao::PROJECT_TERRAIN, ao::project_terrain),
     (lights::PYRO_DRAW, lights::pyro_draw),
+    (particles::PYRO_NEW, particles::pyro_new),
     (shadows::MODEL_FACE, shadows::model_face),
     (shadows::RENDER_SHADOW, shadows::render_shadow),
     (ao::PROJECT_MODEL, ao::project_model),
@@ -992,6 +994,7 @@ pub fn run_game(img: &Image, game_dir: PathBuf) -> u32 {
     shadows::init();
     bloom::init();
     heat::init();
+    particles::init();
     zbuffer::init();
     m.map(TIB, TIB + 0x1000);
     m.map(STACK_LO, STACK_HI);

@@ -76,13 +76,14 @@ enum Row {
     ShadowQuality,
     Bloom,
     Heat,
+    Particles,
     Depth,
     Close,
 }
 
 /// The settings page (F10) and the effects page (F11: the modern graphics effects).
 const SETTINGS: &[Row] = &[Row::Fullscreen, Row::Window, Row::FrameRate, Row::Vsync, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
-const EFFECTS: &[Row] = &[Row::Depth, Row::Ao, Row::Lights, Row::LitSmoke, Row::Shadows, Row::ShadowQuality, Row::Bloom, Row::Heat, Row::Close];
+const EFFECTS: &[Row] = &[Row::Depth, Row::Ao, Row::Lights, Row::LitSmoke, Row::Shadows, Row::ShadowQuality, Row::Bloom, Row::Heat, Row::Particles, Row::Close];
 
 pub struct Menu {
     /// the page's rows: `SETTINGS` or `EFFECTS`
@@ -155,6 +156,7 @@ impl Menu {
             }
             Row::Bloom => (vec!["Off".into(), "On".into()], s.bloom as usize),
             Row::Heat => (vec!["Off".into(), "On".into()], s.heat_shimmer as usize),
+            Row::Particles => (vec!["Off".into(), "On".into()], s.particles as usize),
             Row::Depth => (vec!["Off".into(), "On".into()], s.depth_buffer as usize),
             Row::Close => (Vec::new(), 0),
         }
@@ -190,6 +192,7 @@ impl Menu {
             Row::ShadowQuality => super::shadows::set_quality(settings::ShadowQuality::ALL[k]),
             Row::Bloom => super::bloom::set_enabled(k == 1),
             Row::Heat => super::heat::set_enabled(k == 1),
+            Row::Particles => super::particles::set_enabled(k == 1),
             Row::Depth => super::zbuffer::set_enabled(k == 1),
             Row::Close => {}
         }
@@ -286,6 +289,7 @@ impl Menu {
                 Row::ShadowQuality => "Shadow quality",
                 Row::Bloom => "Bloom",
                 Row::Heat => "Heat shimmer",
+                Row::Particles => "Particles",
                 Row::Depth => "Depth buffer",
                 Row::Close => unreachable!(),
             };
@@ -308,6 +312,7 @@ impl Menu {
             Row::Shadows => "The sun casts shadows from what is on screen",
             Row::Bloom => "A soft glow around fire and explosions",
             Row::Heat => "The air wavers above fire and explosions",
+            Row::Particles => "Sparks and debris fly from explosions",
             Row::Depth => "Fixes triangles drawn in front of nearer ones",
             Row::ShadowQuality => match settings::get().shadow_quality {
                 settings::ShadowQuality::Low => "Fastest; things at the screen's edge may lose theirs",

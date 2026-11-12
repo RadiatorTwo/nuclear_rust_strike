@@ -154,9 +154,9 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       lights (by distance; half from lights behind, aside within 1.5 reach), per primitive (a
       vertex attribute `tint`). Setting `lit_smoke` (F11), only with the lights on;
       `NSTRIKE_SMOKE_STRENGTH`. Open: the user's look
-- [ ] Next: our own particles (sparks, debris, smoke) at the game's explosions. Needs the
-      pyro's place, speed and age (reverse engineering pyroCreate_ and the pyro record);
-      simulated per logic frame, drawn as sprites with the depth buffer
+- [x] Our own particles (2026-11-12, `particles.rs`): sparks and debris at the game's
+      explosions (pyros made by 0x42ff50), parabolas for the picture's time, drawn with their
+      depth into the 3D picture. Setting `particles` (F11). Smoke left to the game's
 
 ### 4. Later
 - [x] Videos (`videos.res`)

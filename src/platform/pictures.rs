@@ -223,6 +223,21 @@ fn state() -> std::sync::MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The time of the picture being drawn in logic frames (the newest frame less 1 plus its
+/// fraction: pictures show the game a frame late), for our own particles.
+pub fn shown_frame() -> Option<f64> {
+    let (_, f) = frames::logic_frame()?;
+    Some(match state().alpha {
+        Some(a) => f as f64 - 1.0 + a.min(256) as f64 / 256.0,
+        None => f as f64,
+    })
+}
+
+/// A picture between logic frames is being drawn (what the game does then is undone).
+pub fn in_picture() -> bool {
+    state().in_picture
+}
+
 /// Registers and x87 state around our own calls into guest code.
 struct Saved {
     r: [u32; 8],

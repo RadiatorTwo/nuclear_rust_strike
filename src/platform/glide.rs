@@ -277,6 +277,10 @@ struct Glide {
 
     /// `add`'s scratch: the vertices' depths
     zs: Vec<f32>,
+    /// our own primitives (`particles.rs`): their depths given, no light or heat from them;
+    /// the guest memory their GrVertex are written to
+    own_z: Option<[f32; 4]>,
+    own_verts: u32,
 }
 
 /// The depth attachment: its texture (multisampled with MSAA: the samples), its size, the
@@ -848,6 +852,8 @@ impl Glide {
                 no_cast: false,
                 no_cast_parts: Vec::new(),
                 batch_mode: glow::TRIANGLES,
+                own_z: None,
+                own_verts: 0,
                 batch_z: false,
                 gamma: 1.0,
                 palette,
@@ -1180,6 +1186,12 @@ impl Glide {
     /// The 3D picture is drawn (the HUD comes next): the ambient occlusion over it, then the
     /// dynamic lights, the heat shimmer, the bloom.
     fn post_3d(&mut self, gl: &glow::Context) {
+        if super::particles::enabled() && self.gdepth.is_some() {
+            let quads = super::particles::quads();
+            if !quads.is_empty() {
+                self.own_quads(gl, &quads);
+            }
+        }
         self.flush(gl);
         self.gbuf = false;
         self.posted = true;
@@ -1219,6 +1231,50 @@ impl Glide {
             let clip = [0, 0, target.0 as i32, target.1 as i32];
             self.bloom.get_or_insert_with(|| super::bloom::Bloom::new(gl)).run(gl, tex, ms, target, out, clip);
         }
+    }
+
+    /// Our own quads into the 3D picture (untextured, iterated colour), with their depth: the
+    /// depth buffer and the bloom's mask take them as the game's. The state is put back.
+    fn own_quads(&mut self, gl: &glow::Context, quads: &[super::particles::Quad]) {
+        let m = mem();
+        if self.own_verts == 0 {
+            self.own_verts = super::alloc(4 * 0x40);
+            if self.own_verts == 0 {
+                return;
+            }
+        }
+        let saved = (self.state, self.cc, self.ac, self.tex, self.alpha_test, self.cast_only, self.no_cast);
+        self.cc = [1, 0, 0, 0, 0];
+        self.ac = [1, 0, 0, 0, 0];
+        self.tex = None;
+        self.alpha_test = (7, 0);
+        self.cast_only = false;
+        self.no_cast = true;
+        for q in quads {
+            let blend = if q.additive { (1, 4) } else { (1, 5) };
+            self.set(gl, |s| {
+                s.blend = blend;
+                s.chroma = false;
+            });
+            let v: [u32; 4] = std::array::from_fn(|k| self.own_verts + 0x40 * k as u32);
+            for k in 0..4 {
+                let f = |o: u32, x: f32| m.wr32(v[k] + o, x.to_bits());
+                let [r, g, b, a] = q.rgba;
+                f(0, q.xy[k].0);
+                f(4, q.xy[k].1);
+                f(0xc, r);
+                f(0x10, g);
+                f(0x14, b);
+                f(0x1c, a);
+                f(0x2c, 1.0);
+            }
+            self.own_z = Some(q.z);
+            self.add(gl, glow::TRIANGLES, &v);
+        }
+        self.own_z = None;
+        let (st, cc, ac, tex, at, co, nc) = saved;
+        self.set(gl, |s| *s = st);
+        (self.cc, self.ac, self.tex, self.alpha_test, self.cast_only, self.no_cast) = (cc, ac, tex, at, co, nc);
     }
 
     /// The framebuffer drawn into.
@@ -1658,7 +1714,10 @@ impl Glide {
         let quad = if let [v0, v1] = *verts { Some(self.line_offsets(xy(v0), xy(v1))) } else { None };
         // the view-space depth of each vertex (3D picture, AO on), by its place
         let mut z = std::mem::take(&mut self.zs);
-        if self.gbuf && self.gdepth.is_some() {
+        if let Some(own) = self.own_z {
+            z.clear();
+            z.extend_from_slice(&own[..verts.len().min(4)]);
+        } else if self.gbuf && self.gdepth.is_some() {
             super::ao::depths(verts.iter().map(|&v| xy(v)), &mut z);
         } else {
             z.clear();
@@ -1666,7 +1725,7 @@ impl Glide {
         }
         // a glow of the 3D picture (additive): a dynamic light (not lines), or smoke tinted by them
         let mut tint = [1.0f32; 3];
-        if self.gbuf && !self.cast_only && self.gdepth.is_some() && (super::lights::enabled() || super::heat::enabled()) && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
+        if self.gbuf && !self.cast_only && self.own_z.is_none() && self.gdepth.is_some() && (super::lights::enabled() || super::heat::enabled()) && verts.len() >= 3 && self.state.blend.1 == 4 && matches!(self.state.blend.0, 1 | 4)
             && let Some(cam) = super::ao::camera(self.target, self.full_map())
         {
             let colour = self.glow_colour(verts, st_box);
