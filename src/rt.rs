@@ -297,11 +297,10 @@ pub extern "C" fn rt_yield(_cpu: *mut Cpu, at: u32) {
     }
 }
 
-/// What a hooked function's recompiled entry calls.
-pub extern "C" fn rt_hook(cpu: *mut Cpu, addr: u32) {
+/// What a hooked function's recompiled entry calls, with the hook's index in `Dispatch::hooks`.
+pub extern "C" fn rt_hook(cpu: *mut Cpu, index: u32) {
     let d = DISPATCH.get().expect("dispatch table not set");
-    let k = d.hooks.binary_search_by_key(&addr, |e| e.0).expect("hook");
-    (d.hooks[k].1)(unsafe { &mut *cpu });
+    (d.hooks[index as usize].1)(unsafe { &mut *cpu });
 }
 
 /// Run the original of the hooked function at `addr`: like a call to it, its return address

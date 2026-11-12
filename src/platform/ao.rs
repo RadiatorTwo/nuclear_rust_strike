@@ -40,11 +40,89 @@ impl std::hash::Hasher for KeyHash {
 
 pub type KeyMap<V> = HashMap<u32, V, std::hash::BuildHasherDefault<KeyHash>>;
 
+/// The projected points of a picture: screen position (x | y << 16, 1/8 pixels) -> up to two z
+/// (0: none). Open addressing in one array (a hash map's lookup, with its control bytes apart
+/// from the entries, took ~7% of the game thread: a lookup for every vertex drawn); an entry
+/// is key | z0 << 32 | z1 << 48, empty while z0 is 0 (no point has z 0).
+#[derive(Default)]
+struct Points {
+    slots: Vec<u64>,
+    /// the slots in use, in the order made
+    used: Vec<u32>,
+}
+
+impl Points {
+    fn slot(&self, key: u32) -> usize {
+        let mask = self.slots.len() - 1;
+        let mut i = (key.wrapping_mul(0x9e37_79b1) >> 8) as usize & mask;
+        loop {
+            let e = self.slots[i];
+            if e >> 32 & 0xffff == 0 || e as u32 == key {
+                return i;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn get(&self, key: u32) -> [u16; 2] {
+        if self.slots.is_empty() {
+            return [0, 0];
+        }
+        let e = self.slots[self.slot(key)];
+        [(e >> 32) as u16, (e >> 48) as u16]
+    }
+
+    /// z for the point at `key` (not 0): the first, a second different one, more left out.
+    fn add(&mut self, key: u32, z: u16) {
+        if 2 * (self.used.len() + 1) > self.slots.len() {
+            self.grow();
+        }
+        let i = self.slot(key);
+        let e = self.slots[i];
+        let (z0, z1) = ((e >> 32) as u16, (e >> 48) as u16);
+        let (z0, z1) = if z0 == 0 {
+            self.used.push(i as u32);
+            (z, 0)
+        } else if z0 == z || z1 != 0 {
+            (z0, z1)
+        } else {
+            (z0, z)
+        };
+        self.slots[i] = key as u64 | (z0 as u64) << 32 | (z1 as u64) << 48;
+    }
+
+    fn grow(&mut self) {
+        let old = std::mem::take(&mut self.slots);
+        let used = std::mem::take(&mut self.used);
+        self.slots = vec![0; (old.len() * 2).max(1 << 14)];
+        for &i in &used {
+            let e = old[i as usize];
+            let j = self.slot(e as u32);
+            self.slots[j] = e;
+            self.used.push(j as u32);
+        }
+    }
+
+    fn clear(&mut self) {
+        for &i in &self.used {
+            self.slots[i as usize] = 0;
+        }
+        self.used.clear();
+    }
+
+    /// (key, first z) of every point
+    fn iter(&self) -> impl Iterator<Item = (u32, u16)> + '_ {
+        self.used.iter().map(|&i| {
+            let e = self.slots[i as usize];
+            (e as u32, (e >> 32) as u16)
+        })
+    }
+}
+
 /// This picture's projections. The projections and the renderer run on the game's thread.
 #[derive(Default)]
 struct Frame {
-    /// screen position (x | y << 16, 1/8 pixels) -> up to two z (0: none)
-    points: KeyMap<[u16; 2]>,
+    points: Points,
     found: Vec<[u16; 2]>,
     sure: Vec<u16>,
     /// the points by cells of `CELL` (for `depth_near`), made at its first use in a picture: a
@@ -74,15 +152,9 @@ fn key(x: i16, y: i16) -> u32 {
     x as u16 as u32 | (y as u16 as u32) << 16
 }
 
-fn point(points: &mut KeyMap<[u16; 2]>, x: i16, y: i16, z: u16) {
-    if z == 0 {
-        return;
-    }
-    let e = points.entry(key(x, y)).or_insert([0, 0]);
-    if e[0] == 0 || e[0] == z {
-        e[0] = z;
-    } else if e[1] == 0 {
-        e[1] = z;
+fn point(points: &mut Points, x: i16, y: i16, z: u16) {
+    if z != 0 {
+        points.add(key(x, y), z);
     }
 }
 
@@ -171,7 +243,7 @@ pub fn depth_near(x: f32, y: f32, reach: f32) -> Option<f32> {
             cell_start.clear();
             cell_start.resize(cells + 1, 0);
             let at = |k: u32| grid_cell(k as u16 as i16 as i32, (k >> 16) as u16 as i16 as i32);
-            for &k in points.keys() {
+            for (k, _) in points.iter() {
                 if let Some(c) = at(k) {
                     cell_start[c + 1] += 1;
                 }
@@ -182,22 +254,25 @@ pub fn depth_near(x: f32, y: f32, reach: f32) -> Option<f32> {
             cell_points.clear();
             cell_points.resize(cell_start[cells] as usize, (0, 0, 0));
             let mut next = cell_start.clone();
-            for (&k, z) in points.iter() {
+            for (k, z) in points.iter() {
                 if let Some(c) = at(k) {
-                    cell_points[next[c] as usize] = (k as u16 as i16, (k >> 16) as u16 as i16, z[0]);
+                    cell_points[next[c] as usize] = (k as u16 as i16, (k >> 16) as u16 as i16, z);
                     next[c] += 1;
                 }
             }
             f.cells_made = true;
         }
         let (xi, yi) = (x as i32, y as i32);
+        // by squared distance (hypot took most of the search's time)
         let mut best: Option<(f32, u16)> = None;
+        let reach2 = reach * reach;
         for j in -1..=1 {
             for i in -1..=1 {
                 let Some(c) = grid_cell(xi + i * CELL, yi + j * CELL) else { continue };
                 for &(px, py, z) in &f.cell_points[f.cell_start[c] as usize..f.cell_start[c + 1] as usize] {
-                    let d = (px as f32 - x).hypot(py as f32 - y);
-                    if d <= reach && best.is_none_or(|b| d < b.0) {
+                    let (dx, dy) = (px as f32 - x, py as f32 - y);
+                    let d = dx * dx + dy * dy;
+                    if d <= reach2 && best.is_none_or(|b| d < b.0) {
                         best = Some((d, z));
                     }
                 }
@@ -221,7 +296,7 @@ pub fn depths(verts: impl ExactSizeIterator<Item = (f32, f32)>, out: &mut Vec<f3
         let (ox, oy) = (m.rd32(DRAW_OFFSET) as i32, m.rd32(DRAW_OFFSET + 4) as i32);
         found.extend(verts.map(|(x, y)| {
             let (x, y) = ((x * 8.0).round() as i32 - ox, (y * 8.0).round() as i32 - oy);
-            points.get(&key(x as i16, y as i16)).copied().unwrap_or([0, 0])
+            points.get(key(x as i16, y as i16))
         }));
         // a reference: the vertices with one candidate (their median), else any candidate
         sure.clear();

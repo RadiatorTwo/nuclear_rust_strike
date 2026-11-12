@@ -224,6 +224,14 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   Glide calls under one lock (`glide::run`, `glide::Call`). A page not yet downloaded runs the
   original. `NSTRIKE_RENDER_CHECK=1` runs both and compares vertices and variables (none
   differ in ~6 million quads). Left: type 4 (0x473c4c) ~1.6%, Order_AddPolyToOT_ ~3%.
+  Then (2026-11-12, ~381 -> ~400-410 fps; runs of the same build differ by about 20 fps): our own
+  code profiled (`NSTRIKE_SAMPLE_RAW` against a link map): `ao::depth_near` compared squared
+  distances (hypot was most of it), `Glide::cast` no longer collects a Vec per primitive, a
+  vertex goes into the batch in one copy, a texture is looked up once per primitive,
+  `rt_hook` gets the hook's index (in address order) from the stub instead of a binary search
+  (~2 million hooked calls a second), the projected points are an open-addressing table
+  (`ao::Points`; ~6400 a picture). Left of ours: `Glide::add` ~12%, the depth lookup ~8%,
+  `projection::compute` ~6%, `wide`'s tags ~4%.
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
   word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's

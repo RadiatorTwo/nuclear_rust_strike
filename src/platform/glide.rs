@@ -1624,18 +1624,21 @@ impl Glide {
         // the combine units a byte each, then invert bits, texturing, the layer and the alpha
         // test, the texture's size
         let bytes = |u: [u32; 5]| u[0] | u[1] << 8 | u[2] << 16 | u[3] << 24;
-        if let Some(a) = self.tex {
+        // the texture: layer, size (one lookup unless it is to be brought up to date)
+        let mut tex = self.tex.and_then(|a| self.textures.get(&a).map(|t| (a, t.dirty || t.pending.is_some(), (t.layer, t.w, t.h))));
+        if let Some((a, true, _)) = tex {
             self.refresh(gl, a);
+            tex = self.textures.get(&a).map(|t| (a, false, (t.layer, t.w, t.h)));
         }
-        let tex = self.tex.and_then(|a| self.textures.get(&a));
+        let tex = tex.map(|t| t.2);
         let mode = [
             bytes(self.cc),
             bytes(self.ac),
-            (self.cc[4] & 1) | (self.ac[4] & 1) << 1 | (tex.is_some() as u32) << 2 | tex.map_or(0, |t| t.layer) << 8 | self.alpha_test.0 << 16 | self.alpha_test.1 << 24,
-            tex.map_or(0, |t| t.w | t.h << 16),
+            (self.cc[4] & 1) | (self.ac[4] & 1) << 1 | (tex.is_some() as u32) << 2 | tex.map_or(0, |t| t.0) << 8 | self.alpha_test.0 << 16 | self.alpha_test.1 << 24,
+            tex.map_or(0, |t| t.1 | t.2 << 16),
         ];
         // Glide's s and t span 0..256 over the texture's longer side, at any size: in texels
-        let scale = tex.map_or(1.0, |t| t.w.max(t.h) as f32 / 256.0);
+        let scale = tex.map_or(1.0, |t| t.1.max(t.2) as f32 / 256.0);
         // x y z r g b ooz a oow, then tmu 0: sow tow oow
         let st = |v: u32| {
             let oow = f32::from_bits(m.rd32(v + 0x2c));
@@ -1706,14 +1709,17 @@ impl Glide {
             self.batch_z = has_z;
         }
         let start = self.batch.len();
+        let tint = tint.map(f32::to_bits);
         let mut put = |v: u32, (x, y): (f32, f32), z: f32| {
             let (s, t) = st(v);
-            self.batch.extend([x.to_bits(), y.to_bits(), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()]);
-            self.batch.extend(konst);
-            self.batch.extend(mode);
-            self.batch.extend(b);
-            self.batch.push(z.to_bits());
-            self.batch.extend(tint.map(f32::to_bits));
+            let mut a = [0u32; VERTEX];
+            a[..8].copy_from_slice(&[x.to_bits(), y.to_bits(), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()]);
+            a[8..12].copy_from_slice(&konst);
+            a[12..16].copy_from_slice(&mode);
+            a[16..20].copy_from_slice(&b);
+            a[20] = z.to_bits();
+            a[21..].copy_from_slice(&tint);
+            self.batch.extend_from_slice(&a);
         };
         if let (Some([n0, n1, n2, n3]), &[v0, v1]) = (quad, verts) {
             put(v0, n0, z[0]);
@@ -1739,13 +1745,18 @@ impl Glide {
     /// `start` is not drawn; a solid one with depth at every corner is a shadow caster, its
     /// corners taken from the zoomed-out projection back to the picture's.
     fn cast(&mut self, start: usize, corners: usize) {
-        let new: Vec<u32> = self.batch.drain(start..).collect();
+        self.cast_from(start, corners);
+        self.batch.truncate(start);
+    }
+
+    fn cast_from(&mut self, start: usize, corners: usize) {
         let (sb, db) = self.state.blend;
         let solid = (sb, db) == (4, 0) || (sb, db) == (1, 5);
         if !(self.gbuf && self.gdepth.is_some() && solid && corners >= 3 && super::shadows::enabled()) {
             return;
         }
         let Some((cx, cy)) = super::ao::centre() else { return };
+        let new = &self.batch[start..];
         let g = [0, 1].map(|i| f32::from_bits(RING_ZOOM[i].load(Ordering::Relaxed)));
         let key = self.state.key;
         let kc = [(key >> 16 & 0xff) as f32 / 255.0, (key >> 8 & 0xff) as f32 / 255.0, (key & 0xff) as f32 / 255.0, self.state.chroma as u32 as f32].map(f32::to_bits);

@@ -228,7 +228,8 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
         module.define_function_bytes(b.id, b.align, &b.bytes, &b.relocs).expect("defining a compiled function");
     }
 
-    for (&addr, _) in &originals {
+    // the stub passes the hook's index in address order (`Dispatch::hooks`)
+    for (index, (&addr, _)) in originals.iter().enumerate() {
         let id = ids[&addr];
         ctx.func.signature = guest_sig.clone();
         ctx.func.name = UserFuncName::user(0, id.as_u32());
@@ -239,7 +240,7 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
             b.append_block_params_for_function_params(blk);
             b.switch_to_block(blk);
             let cpu = b.block_params(blk)[0];
-            let a = b.ins().iconst(I32, addr as i64);
+            let a = b.ins().iconst(I32, index as i64);
             b.ins().call(f, &[cpu, a]);
             b.ins().return_(&[]);
             b.seal_all_blocks();
@@ -300,6 +301,8 @@ pub fn compile_cached(prog: &Program, smc: &Smc, code: &mut Code, hooks: &[(u32,
         .filter_map(|&(a, h)| Some((a, h, module.get_finalized_function(*originals.get(&a)?) as usize)))
         .collect();
     hooks.sort_unstable_by_key(|h| h.0);
+    // in the order of `originals`: the stubs' indices
+    assert_eq!(hooks.len(), originals.len(), "a function hooked twice");
     let dense = Dispatch::dense(&table);
     let _ = DISPATCH.set(Dispatch { table, dense, foreign_stub, enter, hooks });
     Compiled { _module: module, enter, fns, stats }
