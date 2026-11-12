@@ -956,6 +956,7 @@ pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_f
     (shadows::RENDER_SHADOW, shadows::render_shadow),
     (ao::PROJECT_MODEL, ao::project_model),
     (render::GREY_QUAD, render::grey_quad),
+    (render::GREY_TRIANGLE, render::grey_triangle),
     (render::SHADED_QUAD, render::shaded_quad),
 ];
 

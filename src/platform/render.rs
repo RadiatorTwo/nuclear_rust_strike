@@ -1,5 +1,7 @@
-//! Two of gl_RenderPoly_'s renderers in Rust: poly type 8 (0x475314, a textured quad with one
-//! grey level) and type 9 with flag 0x80 (0x475a34, a textured quad with a shade per corner).
+//! Three of gl_RenderPoly_'s renderers in Rust: poly type 8 (0x475314, a textured quad with one
+//! grey level), type 4 (0x473c4c, the same as a triangle: three corners, drawn as (0, 1, 2);
+//! with flag 0x10 the one double at 0x4f4750 added to every u, v; antialiased it calls
+//! grAADrawTriangle, ours the same as grDrawTriangle) and type 9 with flag 0x80 (0x475a34, a textured quad with a shade per corner).
 //! Lifted they took ~15% of the game thread (2026-11-12, mission 1): ~500 000 quads a second,
 //! each with eight calls of the Glide layer's state setters and two imports.
 //!
@@ -28,6 +30,8 @@ use crate::rt::{Cpu, EAX, ESP, Memory, call_original};
 
 /// gl_RenderPoly_'s renderer of poly type 8.
 pub const GREY_QUAD: u32 = 0x475314;
+/// gl_RenderPoly_'s renderer of poly type 4.
+pub const GREY_TRIANGLE: u32 = 0x473c4c;
 /// gl_RenderPoly_'s renderer of poly type 9 with flag 0x80.
 pub const SHADED_QUAD: u32 = 0x475a34;
 
@@ -39,6 +43,8 @@ const DRAW_OFFSET: u32 = 0x4ede5c;
 const SCALE: u32 = 0x4ee094;
 const UV_OFFSETS_GREY: u32 = 0x4f4788;
 const UV_OFFSETS_SHADED: u32 = 0x4ede68;
+/// type 4 with flag 0x10: one double for all corners
+const UV_OFFSET_TRI: u32 = 0x4f4750;
 const VERTS: u32 = 0x523550;
 const VERTEX: u32 = 0x3c;
 /// per texture page: GrTexInfo (20 bytes; the format at +0xc), start address, downloaded
@@ -138,9 +144,9 @@ fn place(mode: Mode, v: i16, offset: u32, scale: f32) -> Option<f32> {
 
 /// The corners' x, y of a quad whose corners start at `at`, `stride` bytes apart; None: the
 /// original is to run.
-fn places(m: &Memory, mode: Mode, at: u32, stride: u32) -> Option<[(f32, f32); 4]> {
+fn places<const N: usize>(m: &Memory, mode: Mode, at: u32, stride: u32) -> Option<[(f32, f32); N]> {
     let (ox, oy, scale) = (m.rd32(DRAW_OFFSET), m.rd32(DRAW_OFFSET + 4), f32::from_bits(m.rd32(SCALE)));
-    let mut p = [(0.0, 0.0); 4];
+    let mut p = [(0.0, 0.0); N];
     for (k, q) in p.iter_mut().enumerate() {
         let a = at + stride * k as u32;
         *q = (place(mode, m.rd16(a) as i16, ox, scale)?, place(mode, m.rd16(a + 2) as i16, oy, scale)?);
@@ -149,7 +155,7 @@ fn places(m: &Memory, mode: Mode, at: u32, stride: u32) -> Option<[(f32, f32); 4
 }
 
 /// s, t of the corners from their u, v bytes (at `at`, `stride` apart) and the two offsets.
-fn texels(m: &Memory, mode: Mode, at: u32, stride: u32, c: (f64, f64)) -> [(f32, f32); 4] {
+fn texels<const N: usize>(m: &Memory, mode: Mode, at: u32, stride: u32, c: (f64, f64)) -> [(f32, f32); N] {
     let pick = [(c.0, c.0), (c.1, c.0), (c.1, c.1), (c.0, c.1)];
     std::array::from_fn(|k| {
         let a = at + stride * k as u32;
@@ -243,8 +249,9 @@ fn set_keying(m: &Memory, calls: &mut Calls, flags: u32, page: u32) {
 
 // ---- the renderers ----------------------------------------------------------------------------
 
-/// Type 8 into guest memory; the Glide calls, or None if the original is to run.
-fn grey(c: &Cpu) -> Option<Calls> {
+/// Type 8 (N 4) or type 4 (N 3) into guest memory; the Glide calls, or None if the original
+/// is to run.
+fn grey<const N: usize>(c: &Cpu) -> Option<Calls> {
     let m = mem();
     let q = c.r[EAX];
     let (flags, page) = (m.rd32(q), m.rd16(q + 0xc) as u32);
@@ -252,15 +259,15 @@ fn grey(c: &Cpu) -> Option<Calls> {
     if m.rd8(PAGE_LOADED + page) == 0 {
         return None;
     }
-    let xy = places(m, mode, q + 0x10, 8)?;
+    let g = m.rd8(GLIDE_FLAGS);
+    let xy = places::<N>(m, mode, q + 0x10, 8)?;
     let st = if flags & 0x10 != 0 {
         let d = |a: u32| f64::from_bits(m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32);
-        let c = (d(UV_OFFSETS_GREY), d(UV_OFFSETS_GREY + 8));
-        texels(m, mode, q + 0x14, 8, c)
+        let c = if N == 4 { (d(UV_OFFSETS_GREY), d(UV_OFFSETS_GREY + 8)) } else { (d(UV_OFFSET_TRI), d(UV_OFFSET_TRI)) };
+        texels::<N>(m, mode, q + 0x14, 8, c)
     } else {
-        texels(m, mode, q + 0x14, 8, (0.0, 0.0))
+        texels::<N>(m, mode, q + 0x14, 8, (0.0, 0.0))
     };
-    let g = m.rd8(GLIDE_FLAGS);
     let mut calls = Calls::new();
     set_filter(m, &mut calls, g & 2 != 0 && flags & 0x1000 != 0);
     set_aa(m, g & 1 != 0 && flags & 0x2000 != 0);
@@ -276,10 +283,14 @@ fn grey(c: &Cpu) -> Option<Calls> {
         set_cached(m, &mut calls, S_BLEND, 2, Call::AlphaBlend(4, 0));
     }
     let grey = m.rd8(q + 0xf) as f32;
-    for k in 0..4 {
-        write_vertex(m, k, xy[k as usize], [grey, grey, grey, 255.0], st[k as usize]);
+    for k in 0..N {
+        write_vertex(m, k as u32, xy[k], [grey, grey, grey, 255.0], st[k]);
     }
-    draw(&mut calls);
+    if N == 4 {
+        draw(&mut calls);
+    } else {
+        calls.push(Call::Triangle([VERTS, VERTS + VERTEX, VERTS + 2 * VERTEX]));
+    }
     Some(calls)
 }
 
@@ -292,9 +303,9 @@ fn shaded(c: &Cpu) -> Option<Calls> {
     if m.rd8(PAGE_LOADED + page) == 0 {
         return None;
     }
-    let xy = places(m, mode, q + 0xe, 10)?;
+    let xy = places::<4>(m, mode, q + 0xe, 10)?;
     let f = |a: u32| f32::from_bits(m.rd32(a)) as f64;
-    let st = texels(m, mode, q + 0x12, 10, (f(UV_OFFSETS_SHADED), f(UV_OFFSETS_SHADED + 4)));
+    let st = texels::<4>(m, mode, q + 0x12, 10, (f(UV_OFFSETS_SHADED), f(UV_OFFSETS_SHADED + 4)));
     if m.rd32(SHADED_FILTER) == 0 {
         flags &= !0x1000;
     }
@@ -340,7 +351,11 @@ fn run(c: &mut Cpu, addr: u32, ours: fn(&Cpu) -> Option<Calls>) {
 }
 
 pub fn grey_quad(c: &mut Cpu) {
-    run(c, GREY_QUAD, grey);
+    run(c, GREY_QUAD, grey::<4>);
+}
+
+pub fn grey_triangle(c: &mut Cpu) {
+    run(c, GREY_TRIANGLE, grey::<3>);
 }
 
 pub fn shaded_quad(c: &mut Cpu) {
@@ -353,6 +368,7 @@ fn check(c: &mut Cpu, addr: u32, ours: fn(&Cpu) -> Option<Calls>) {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     static QUADS: AtomicU64 = AtomicU64::new(0);
     static BAD: AtomicU64 = AtomicU64::new(0);
+    static TRIANGLES: AtomicU64 = AtomicU64::new(0);
     let m = mem();
     let before = m.slice(STATE.0, STATE.1).to_vec();
     if ours(c).is_none() {
@@ -363,6 +379,9 @@ fn check(c: &mut Cpu, addr: u32, ours: fn(&Cpu) -> Option<Calls>) {
     m.slice(STATE.0, STATE.1).copy_from_slice(&before);
     call_original(c, addr);
     let quads = QUADS.fetch_add(1, Relaxed) + 1;
+    if addr == GREY_TRIANGLE {
+        TRIANGLES.fetch_add(1, Relaxed);
+    }
     let (verts, state) = (m.slice(VERTS, 4 * VERTEX as usize), m.slice(STATE.0, STATE.1));
     if (verts != our_verts.as_slice() || state != our_state.as_slice()) && BAD.fetch_add(1, Relaxed) < 20 {
         let at = (0..our_verts.len() / 4).find(|&i| verts[4 * i..4 * i + 4] != our_verts[4 * i..4 * i + 4]);
@@ -373,6 +392,6 @@ fn check(c: &mut Cpu, addr: u32, ours: fn(&Cpu) -> Option<Calls>) {
         );
     }
     if quads % 200_000 == 0 {
-        super::log!("render: {quads} quads checked, {} differ", BAD.load(Relaxed));
+        super::log!("render: {quads} checked ({} triangles), {} differ", TRIANGLES.load(Relaxed), BAD.load(Relaxed));
     }
 }

@@ -88,7 +88,7 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
       A/B run (2026-11-08)
 - [x] Speed: vec3fp16_Project*ListASM_ in Rust (`projection.rs`, ~276 -> ~294 fps), the
       quad renderers 0x475314 / 0x475a34 in Rust (`render.rs`, ~316 -> ~381 fps, 2026-11-12).
-      Next: type 4 renderer 0x473c4c (~1.6%), Order_AddPolyToOT_ (~3%).
+      Type 4 renderer 0x473c4c in Rust too. Next: Glide::add, the depth lookup.
 - [x] Vsync, setting `vsync` (F10 menu, `NSTRIKE_VSYNC`, default on; 2026-11-09): the game
       thread's context swaps with interval 1 (fullscreen: the swaps' times then fall on whole refreshes; in a window the
       compositor kept tearing away anyway). Pacing stays ours: below the display's rate the

@@ -223,7 +223,7 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   their variables in guest memory (`[0x4ede64]`.., the other renderers use them), their
   Glide calls under one lock (`glide::run`, `glide::Call`). A page not yet downloaded runs the
   original. `NSTRIKE_RENDER_CHECK=1` runs both and compares vertices and variables (none
-  differ in ~6 million quads). Left: type 4 (0x473c4c) ~1.6%, Order_AddPolyToOT_ ~3%.
+  differ in ~6 million quads). Type 4 (0x473c4c, the same as a triangle; ~1.2 million checked, none differ) since then too; its grAADrawTriangle is our grDrawTriangle. Order_AddPolyToOT_ (~3%) is an insertion into a sorted list: its cost is walking the list, not worth a hook.
   Then (2026-11-12, ~381 -> ~400-410 fps; runs of the same build differ by about 20 fps): our own
   code profiled (`NSTRIKE_SAMPLE_RAW` against a link map): `ao::depth_near` compared squared
   distances (hypot was most of it), `Glide::cast` no longer collects a Vec per primitive, a
