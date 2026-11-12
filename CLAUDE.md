@@ -389,7 +389,9 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   lights: depth from the projected points, for sprites the nearest one within 32 px
   (`ao::depth_near`); colour = local colour x texture rectangle mean (CPU copy `Texture::rgb`)
   x alpha by the alpha combine (the glows' constant has alpha 0: function 6, texture alpha
-  minus local). Merged, 32 at most, applied after the AO (picture * (1 + 1.6 L) + 0.12 L).
+  minus local). Merged, 32 at most, applied after the AO (picture * (1 + 1.6 L) + 0.12 L;
+  1.6 L above 1 softly limited to at most 2, a light's size factor at most 0.75, merged
+  colours at most 1.5: explosions were glaring, 2026-11-12).
   The depth is made when AO or lights want it (`ao::depth_wanted`). Setting `dynamic_lights`
   (F11, `NSTRIKE_LIGHTS`), `NSTRIKE_GBUFFER=lights`, `NSTRIKE_LIGHT_STRENGTH`/`_REACH`,
   `NSTRIKE_LIGHT_PYROS` (hex list), `NSTRIKE_LIGHT_LOG=1` (glows by sequence). Fire keys in
