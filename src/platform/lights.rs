@@ -231,8 +231,8 @@ fn view(l: &Light) -> ([f32; 3], f32, [f32; 3]) {
     let reach = (l.size * ao::tune("NSTRIKE_LIGHT_REACH", REACH)).clamp(REACH_MIN, REACH_MAX);
     let z = l.at[2];
     let k = (z - reach * 0.2).max(z * 0.5) / z;
-    // small ones (sparks) weaker, large ones (explosions) up to 1.2
-    let mut s = (l.size / 150.0).clamp(0.25, 1.2);
+    // small ones (sparks) weaker, large ones (explosions) up to 0.75 (1.2 was glaring)
+    let mut s = (l.size / 150.0).clamp(0.25, 0.75);
     // whitish ones (muzzle flashes) weaker: they brightened every channel alike
     let (lo, hi) = l.colour.iter().fold((f32::MAX, 0.0f32), |a, &c| (a.0.min(c), a.1.max(c)));
     if hi > 0.0 {
@@ -263,7 +263,7 @@ pub fn merge(lights: &[Light]) -> Vec<Merged> {
                 let w = wb / (wa + wb).max(1e-6);
                 for i in 0..3 {
                     o.0[i] += (l.0[i] - o.0[i]) * w;
-                    o.2[i] = (o.2[i] + l.2[i]).min(2.5);
+                    o.2[i] = (o.2[i] + l.2[i]).min(1.5);
                 }
                 o.1 = o.1.max(l.1);
             }
@@ -309,6 +309,9 @@ void main() {
             sum += lcol[i] * a * (0.2 + 0.8 * ndl);
         }
         sum *= strength * (1.0 - clamp(g.g, 0.0, 1.0));
+        // above 1 softly limited (at most 2: the picture at most 3 times as bright)
+        vec3 e = max(sum - 1.0, 0.0);
+        sum = min(sum, 1.0) + e / (1.0 + e);
     }
     o = vec4(sum * added, 1.0);
 }
