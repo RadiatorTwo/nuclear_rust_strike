@@ -178,8 +178,7 @@ fn write_vertex(m: &Memory, k: u32, xy: (f32, f32), rgba: [f32; 4], st: (f32, f3
 
 fn draw(calls: &mut Calls) {
     let v = |k: u32| VERTS + VERTEX * k;
-    calls.push(Call::Triangle([v(0), v(1), v(2)]));
-    calls.push(Call::Triangle([v(0), v(3), v(2)]));
+    calls.push(Call::Quad([v(0), v(1), v(2), v(3)]));
 }
 
 // ---- the Glide layer's setters --------------------------------------------------------------

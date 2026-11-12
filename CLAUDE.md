@@ -232,6 +232,11 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   (~2 million hooked calls a second), the projected points are an open-addressing table
   (`ao::Points`; ~6400 a picture). Left of ours: `Glide::add` ~12%, the depth lookup ~8%,
   `projection::compute` ~6%, `wide`'s tags ~4%.
+  Then (2026-11-12, all effects on, A/B ~660 -> ~680-695 fps at 1600x900): `wide`'s tags are a
+  table per 64 KB block indexed by the address (`wide::Tags`, no hashing), `ao::depths` takes
+  a short path when every vertex has one z, and `render.rs`'s quads go to `Glide::add` as one
+  `glide::Call::Quad` (corners, depth and state once for both triangles; the depth's
+  reference, the depth buffer's fill and the s, t box are the quad's, not each triangle's).
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
   word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's

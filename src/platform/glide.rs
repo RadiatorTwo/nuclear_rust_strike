@@ -1611,7 +1611,8 @@ impl Glide {
         }
     }
 
-    /// Add vertices (GrVertex at guest addresses) as primitives of `mode`.
+    /// Add vertices (GrVertex at guest addresses) as primitives of `mode`: two a line, three a
+    /// triangle, four a quad (as the triangles (0, 1, 2) and (0, 3, 2), `glide::Call::Quad`).
     fn add(&mut self, gl: &glow::Context, mode: u32, verts: &[u32]) {
         if mode != self.batch_mode {
             self.flush(gl);
@@ -1710,7 +1711,7 @@ impl Glide {
         }
         let start = self.batch.len();
         let tint = tint.map(f32::to_bits);
-        let mut put = |v: u32, (x, y): (f32, f32), z: f32| {
+        let vertex = |v: u32, (x, y): (f32, f32), z: f32| {
             let (s, t) = st(v);
             let mut a = [0u32; VERTEX];
             a[..8].copy_from_slice(&[x.to_bits(), y.to_bits(), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()]);
@@ -1719,9 +1720,17 @@ impl Glide {
             a[16..20].copy_from_slice(&b);
             a[20] = z.to_bits();
             a[21..].copy_from_slice(&tint);
-            self.batch.extend_from_slice(&a);
+            a
         };
-        if let (Some([n0, n1, n2, n3]), &[v0, v1]) = (quad, verts) {
+        let batch = &mut self.batch;
+        let mut put = |v: u32, xy: (f32, f32), z: f32| batch.extend_from_slice(&vertex(v, xy, z));
+        if verts.len() == 4 {
+            // a quad: the triangles (0, 1, 2) and (0, 3, 2), each corner made once
+            let a: [_; 4] = std::array::from_fn(|k| vertex(verts[k], xy(verts[k]), z[k]));
+            for k in [0, 1, 2, 0, 3, 2] {
+                batch.extend_from_slice(&a[k]);
+            }
+        } else if let (Some([n0, n1, n2, n3]), &[v0, v1]) = (quad, verts) {
             put(v0, n0, z[0]);
             put(v0, n1, z[0]);
             put(v1, n2, z[1]);
@@ -2203,6 +2212,8 @@ pub enum Call {
     ChromakeyValue(u32),
     /// grDrawTriangle (and grAADrawTriangle): GrVertex at guest addresses
     Triangle([u32; 3]),
+    /// grDrawTriangle of (0, 1, 2) and (0, 3, 2), with one look-up of depth and state
+    Quad([u32; 4]),
 }
 
 /// The calls in order, under one lock of the Glide state (an import each locks it).
@@ -2220,6 +2231,7 @@ pub fn run(calls: &[Call]) {
                 Call::Chromakey(on) => g.set(gl, |s| s.chroma = on),
                 Call::ChromakeyValue(k) => g.set(gl, |s| s.key = k),
                 Call::Triangle(v) => g.add(gl, glow::TRIANGLES, &v),
+                Call::Quad(v) => g.add(gl, glow::TRIANGLES, &v),
             }
         }
     });

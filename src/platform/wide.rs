@@ -243,11 +243,36 @@ thread_local! {
     static CASTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// ObjMgr draws an object (outside the ring)
     static OBJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// what is known of each primitive, by its address (`alloc_poly`); one map, looked up once
-    /// per primitive drawn (four hash sets and maps before: ~6% of the game thread)
-    static TAGS: std::cell::RefCell<super::ao::KeyMap<Tag>> = std::cell::RefCell::new(Default::default());
+    /// what is known of each primitive, by its address (`alloc_poly`); looked up once per
+    /// primitive drawn (four hash sets and maps before: ~6% of the game thread, one hash map
+    /// then ~4%)
+    static TAGS: std::cell::RefCell<Tags> = std::cell::RefCell::new(Tags::default());
     /// `hud` at the HUD's last start: tags of older HUD primitives are not the HUD's
     static HUD_EPOCH: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+/// The tags by address: a table per 64 KB of guest memory with primitives in it, indexed by
+/// the address's low 16 bits (no hashing; the primitives lie in a few such blocks).
+#[derive(Default)]
+struct Tags {
+    blocks: Vec<Option<Box<[Tag]>>>,
+}
+
+impl Tags {
+    fn insert(&mut self, p: u32, tag: Tag) {
+        let b = (p >> 16) as usize;
+        if b >= self.blocks.len() {
+            self.blocks.resize_with(b + 1, || None);
+        }
+        self.blocks[b].get_or_insert_with(|| vec![Tag::default(); 1 << 16].into_boxed_slice())[(p & 0xffff) as usize] = tag;
+    }
+
+    fn get(&self, p: u32) -> Tag {
+        match self.blocks.get((p >> 16) as usize) {
+            Some(Some(t)) => t[(p & 0xffff) as usize],
+            _ => Tag::default(),
+        }
+    }
 }
 
 /// A primitive's tag.
@@ -343,7 +368,7 @@ pub fn alloc_poly(c: &mut Cpu) {
 
 /// gl_RenderPoly_(eax primitive): the HUD's in the frame's 4:3 middle, the rest over all of it.
 pub fn render_poly(c: &mut Cpu) {
-    let tag = TAGS.with_borrow(|t| t.get(&c.r[EAX]).copied().unwrap_or_default());
+    let tag = TAGS.with_borrow(|t| t.get(c.r[EAX]));
     let hud = tag.hud != 0 && tag.hud == HUD_EPOCH.get();
     super::lights::drawing(tag.made);
     glide::set_cast_only(tag.cast);

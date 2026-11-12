@@ -298,6 +298,11 @@ pub fn depths(verts: impl ExactSizeIterator<Item = (f32, f32)>, out: &mut Vec<f3
             let (x, y) = ((x * 8.0).round() as i32 - ox, (y * 8.0).round() as i32 - oy);
             points.get(key(x as i16, y as i16))
         }));
+        // the common case: one z at every vertex
+        if found.iter().all(|f| f[0] != 0 && f[1] == 0) {
+            out.extend(found.iter().map(|f| f[0] as f32));
+            return true;
+        }
         // a reference: the vertices with one candidate (their median), else any candidate
         sure.clear();
         sure.extend(found.iter().filter(|f| f[0] != 0 && f[1] == 0).map(|f| f[0]));
