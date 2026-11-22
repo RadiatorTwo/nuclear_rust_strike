@@ -524,3 +524,9 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
 - `cargo build --release`, `cargo test --release` (no game files needed).
 - `./target/release/nstrike.exe` from the repository: installs into `game_files/` from the
   CD image there, compiles (~1.4 s, 3081 functions) and runs.
+- Releases: `.github/workflows/build.yml` (as future_rust_cop's, Windows only) runs on a tag
+  `v*` (or by hand): tests, builds, zips nstrike.exe, README.md, LICENSE and
+  `dist/game_files` (README.txt for players) into `nstrike-<tag>-windows-x64.zip`, a GitHub
+  release with generated notes. A release build has no console window (`windows_subsystem`):
+  messages to the parent console, else `nstrike.log` beside the EXE; setup errors (no CD
+  image, wrong EXE) also as a message box (`main.rs` `fail`).

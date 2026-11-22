@@ -3,6 +3,11 @@
 //!     nstrike [path to NUKEPC.EXE]
 //!
 //! Without a path: the game in `game_files` (installed there from a CD image first: `setup`).
+//!
+//! A release build is a Windows program without a console window: its messages go to the
+//! console it was started from, else to nstrike.log next to nstrike.exe.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use nstrike::discover::{Code, Program, TEXT_END};
 use nstrike::image::Image;
@@ -12,7 +17,48 @@ use nstrike::smc::Smc;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Without a console window of our own: messages to the console we were started from (or
+/// wherever they were redirected), else to nstrike.log next to nstrike.exe.
+#[cfg(windows)]
+fn output() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::*;
+    unsafe {
+        if !GetStdHandle(STD_ERROR_HANDLE).is_null() {
+            return;
+        }
+        let out = if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
+            std::fs::OpenOptions::new().write(true).open("CONOUT$").ok()
+        } else {
+            let log = std::env::current_exe().ok().and_then(|p| Some(p.parent()?.join("nstrike.log")));
+            log.and_then(|p| std::fs::File::create(p).ok())
+        };
+        if let Some(f) = out {
+            let h = f.into_raw_handle();
+            SetStdHandle(STD_OUTPUT_HANDLE, h as _);
+            SetStdHandle(STD_ERROR_HANDLE, h as _);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn output() {}
+
+/// What the player must know before the game can start (no game found, wrong version): in a
+/// message box too, since a release build has no console window.
+fn fail(text: &str) -> ! {
+    eprintln!("{text}");
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide("Nuclear Strike").as_ptr(), MB_OK | MB_ICONERROR);
+    }
+    std::process::exit(2)
+}
+
 fn main() {
+    output();
     nstrike::platform::reserve_memory();
     // guest calls nest on the host stack like the original's: run on a thread with a large one
     let code = std::thread::Builder::new().stack_size(256 << 20).spawn(run).unwrap().join().unwrap();
@@ -24,10 +70,7 @@ fn run() -> u32 {
         Some(p) => setup::check(Path::new(&p)).map(|_| PathBuf::from(p)),
         None => setup::game_exe(&setup::root()),
     };
-    let exe = found.unwrap_or_else(|text| {
-        eprintln!("{text}");
-        std::process::exit(2)
-    });
+    let exe = found.unwrap_or_else(|text| fail(&text));
     let mut img = Image::load(&exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
     for &(addr, old, new) in nstrike::platform::PATCHES.iter().copied().flatten() {
         img.patch(addr, old, new).unwrap_or_else(|e| panic!("{e}"));

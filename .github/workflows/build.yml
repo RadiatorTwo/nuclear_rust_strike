@@ -1,0 +1,50 @@
+name: Build
+
+# releases only: a tag v*, or started by hand (Actions, Run workflow)
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "nstrike-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/nstrike.exe, README.md, LICENSE $name
+          Copy-Item -Recurse dist/game_files $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: nstrike-*.zip
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: nstrike-*.zip
+          generate_release_notes: true
