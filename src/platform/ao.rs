@@ -49,12 +49,16 @@ struct Points {
     slots: Vec<u64>,
     /// the slots in use, in the order made
     used: Vec<u32>,
+    /// 32 - log2(slots): the slot is the hash's top bits
+    shift: u32,
 }
 
 impl Points {
     fn slot(&self, key: u32) -> usize {
         let mask = self.slots.len() - 1;
-        let mut i = (key.wrapping_mul(0x9e37_79b1) >> 8) as usize & mask;
+        // the product's top bits: they depend on all of the key's (bits 8.. depend on x and
+        // only y's low 7: points 16 pixels apart in y shared a slot, long probe chains)
+        let mut i = (key.wrapping_mul(0x9e37_79b1) >> self.shift) as usize;
         loop {
             let e = self.slots[i];
             if e >> 32 & 0xffff == 0 || e as u32 == key {
@@ -95,6 +99,7 @@ impl Points {
         let old = std::mem::take(&mut self.slots);
         let used = std::mem::take(&mut self.used);
         self.slots = vec![0; (old.len() * 2).max(1 << 14)];
+        self.shift = 32 - self.slots.len().trailing_zeros();
         for &i in &used {
             let e = old[i as usize];
             let j = self.slot(e as u32);
@@ -130,6 +135,8 @@ struct Frame {
     /// `cell_points[cell_start[k]..cell_start[k + 1]]`
     cell_start: Vec<u32>,
     cell_points: Vec<(i16, i16, u16)>,
+    /// where the next point of a cell goes while sorting (kept: no allocation per picture)
+    cell_next: Vec<u32>,
     cells_made: bool,
 }
 
@@ -282,7 +289,9 @@ pub fn depth_near(x: f32, y: f32, reach: f32) -> Option<f32> {
             }
             cell_points.clear();
             cell_points.resize(cell_start[cells] as usize, (0, 0, 0));
-            let mut next = cell_start.clone();
+            let next = &mut f.cell_next;
+            next.clear();
+            next.extend_from_slice(cell_start);
             for (k, z) in points.iter() {
                 if let Some(c) = at(k) {
                     cell_points[next[c] as usize] = (k as u16 as i16, (k >> 16) as u16 as i16, z);
@@ -291,13 +300,14 @@ pub fn depth_near(x: f32, y: f32, reach: f32) -> Option<f32> {
             }
             f.cells_made = true;
         }
-        let (xi, yi) = (x as i32, y as i32);
-        // by squared distance (hypot took most of the search's time)
+        // by squared distance (hypot took most of the search's time); only the cells the
+        // square of `reach` around (x, y) touches (at most 2 x 2: reach is at most a cell)
         let mut best: Option<(f32, u16)> = None;
         let reach2 = reach * reach;
-        for j in -1..=1 {
-            for i in -1..=1 {
-                let Some(c) = grid_cell(xi + i * CELL, yi + j * CELL) else { continue };
+        let span = |a: f32| ((a - reach).floor() as i32).div_euclid(CELL)..=((a + reach).floor() as i32).div_euclid(CELL);
+        for cj in span(y) {
+            for ci in span(x) {
+                let Some(c) = grid_cell(ci * CELL, cj * CELL) else { continue };
                 for &(px, py, z) in &f.cell_points[f.cell_start[c] as usize..f.cell_start[c + 1] as usize] {
                     let (dx, dy) = (px as f32 - x, py as f32 - y);
                     let d = dx * dx + dy * dy;
@@ -324,7 +334,9 @@ pub fn depths(verts: impl ExactSizeIterator<Item = (f32, f32)>, out: &mut Vec<f3
         let m = super::mem();
         let (ox, oy) = (m.rd32(DRAW_OFFSET) as i32, m.rd32(DRAW_OFFSET + 4) as i32);
         found.extend(verts.map(|(x, y)| {
-            let (x, y) = ((x * 8.0).round() as i32 - ox, (y * 8.0).round() as i32 - oy);
+            // rounded half away from zero as round() does, inline (round() was a call)
+            let r = |v: f32| (v + 0.5f32.copysign(v)) as i32;
+            let (x, y) = (r(x * 8.0) - ox, r(y * 8.0) - oy);
             points.get(key(x as i16, y as i16))
         }));
         // the common case: one z at every vertex

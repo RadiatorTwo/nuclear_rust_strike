@@ -267,6 +267,16 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   switch). `rt_fpu_round` runs with the default rounding itself. Not in such runs: fldcw,
   helpers, fild qword. A float store beyond a float's range under 0xc7f gives the largest
   float (the FPU's masked overflow), not infinity (`rt_fpu_round` gave infinity before). `rt_lookup` (indirect calls) reads a dense table over the code;
+  Then (2026-11-13, A/B ~468 -> ~488 fps): `ao::Points` takes the hash's top bits (bits 8..
+  of the product depend on x and y's low 7 bits only: points 16 pixels apart in y shared a
+  slot), the lookup rounds inline (round() was a call), `Glide::add` reads each corner once
+  (s, t with the division were read twice, x, y up to three times) and divides only when oow
+  is not 1, `depth_near` searches the 2 x 2 cells its reach touches (not 3 x 3). Left of ours,
+  spread thin: `Glide::add` ~9% (guest memory reads of the GrVertex), the lookup ~4% (the
+  table's loads), `depth_near` ~2.5%, `ao::point` ~2.5%. Profiling: llvm-objdump and
+  llvm-symbolizer are in `C:\Program Files\LLVM\bin`; the raw samples (only the last 2 s)
+  against the link map give a function's hot offsets. A/B: runs of one build differ by the
+  intro's skip (the mission starts seconds apart): compare from the mission's start.
   thunk addresses miss at once. Glide imports that never wait keep the turn (`SLOW_GLIDE`
   lists those that give it up). A thread keeps the turn at loop heads for `SLICE` (0.5 ms,
   `tsc`): the game and controller threads traded it 60 000 times a second.

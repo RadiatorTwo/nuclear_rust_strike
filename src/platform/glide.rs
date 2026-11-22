@@ -1696,29 +1696,33 @@ impl Glide {
         ];
         // Glide's s and t span 0..256 over the texture's longer side, at any size: in texels
         let scale = tex.map_or(1.0, |t| t.1.max(t.2) as f32 / 256.0);
+        // each corner read once (at most four): x y, r g b a, s t in texels; the GrVertex is
         // x y z r g b ooz a oow, then tmu 0: sow tow oow
-        let st = |v: u32| {
-            let oow = f32::from_bits(m.rd32(v + 0x2c));
-            let oow = if oow != 0.0 { oow } else { 1.0 };
-            (f32::from_bits(m.rd32(v + 0x24)) / oow * scale, f32::from_bits(m.rd32(v + 0x28)) / oow * scale)
-        };
+        let n = verts.len().min(4);
+        let verts = &verts[..n];
+        let mut corner = [[0u32; 8]; 4];
         let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-        for &v in verts {
-            let (s, t) = st(v);
+        for (c, &v) in corner.iter_mut().zip(verts) {
+            let oow = f32::from_bits(m.rd32(v + 0x2c));
+            let (s, t) = (f32::from_bits(m.rd32(v + 0x24)), f32::from_bits(m.rd32(v + 0x28)));
+            // oow is almost always 1 (the division's latency was the most of this loop)
+            let (s, t) = if oow == 1.0 || oow == 0.0 { (s, t) } else { (s / oow, t / oow) };
+            let (s, t) = (s * scale, t * scale);
             b = [b[0].min(s), b[1].min(t), b[2].max(s), b[3].max(t)];
+            *c = [m.rd32(v), m.rd32(v + 4), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()];
         }
         let st_box = b;
         let b = b.map(f32::to_bits);
-        let xy = |v: u32| (f32::from_bits(m.rd32(v)), f32::from_bits(m.rd32(v + 4)));
+        let xy = |k: usize| (f32::from_bits(corner[k][0]), f32::from_bits(corner[k][1]));
         // a line: a quad as wide as the game's line at its resolution
-        let quad = if let [v0, v1] = *verts { Some(self.line_offsets(xy(v0), xy(v1))) } else { None };
+        let quad = if n == 2 { Some(self.line_offsets(xy(0), xy(1))) } else { None };
         // the view-space depth of each vertex (3D picture, AO on), by its place
         let mut z = std::mem::take(&mut self.zs);
         if let Some(own) = self.own_z {
             z.clear();
-            z.extend_from_slice(&own[..verts.len().min(4)]);
+            z.extend_from_slice(&own[..n]);
         } else if self.gbuf && self.gdepth.is_some() {
-            super::ao::depths(verts.iter().map(|&v| xy(v)), &mut z);
+            super::ao::depths((0..n).map(xy), &mut z);
         } else {
             z.clear();
             z.resize(verts.len(), 0.0);
@@ -1736,14 +1740,14 @@ impl Glide {
             // a sprite has no projected points: the nearest point's depth
             if z.iter().all(|&d| d <= 0.0) {
                 let n = verts.len() as f32;
-                let (cx, cy) = verts.iter().fold((0.0, 0.0), |a, &v| (a.0 + xy(v).0 / n, a.1 + xy(v).1 / n));
+                let (cx, cy) = (0..verts.len()).fold((0.0, 0.0), |a, k| (a.0 + xy(k).0 / n, a.1 + xy(k).1 / n));
                 if let Some(d) = super::ao::depth_near(cx, cy, 32.0) {
                     z.iter_mut().for_each(|z| *z = d);
                 }
             }
             let [ox, oy, kx, ky] = self.full_map();
             let th = self.target.1 as f32;
-            let corners: Vec<_> = verts.iter().map(|&v| (ox + xy(v).0 * kx, th - (oy + xy(v).1 * ky))).collect();
+            let corners: Vec<_> = (0..verts.len()).map(|k| (ox + xy(k).0 * kx, th - (oy + xy(k).1 * ky))).collect();
             if super::lights::smoke_enabled() && super::lights::is_smoke() {
                 tint = super::lights::smoke_tint(&corners, &z, cam, &self.smoke_lights);
             }
@@ -1770,10 +1774,11 @@ impl Glide {
         }
         let start = self.batch.len();
         let tint = tint.map(f32::to_bits);
-        let vertex = |v: u32, (x, y): (f32, f32), z: f32| {
-            let (s, t) = st(v);
+        let vertex = |k: usize, (x, y): (f32, f32), z: f32| {
             let mut a = [0u32; VERTEX];
-            a[..8].copy_from_slice(&[x.to_bits(), y.to_bits(), m.rd32(v + 0xc), m.rd32(v + 0x10), m.rd32(v + 0x14), m.rd32(v + 0x1c), s.to_bits(), t.to_bits()]);
+            a[..8].copy_from_slice(&corner[k]);
+            a[0] = x.to_bits();
+            a[1] = y.to_bits();
             a[8..12].copy_from_slice(&konst);
             a[12..16].copy_from_slice(&mode);
             a[16..20].copy_from_slice(&b);
@@ -1782,23 +1787,23 @@ impl Glide {
             a
         };
         let batch = &mut self.batch;
-        let mut put = |v: u32, xy: (f32, f32), z: f32| batch.extend_from_slice(&vertex(v, xy, z));
-        if verts.len() == 4 {
+        let mut put = |k: usize, xy: (f32, f32), z: f32| batch.extend_from_slice(&vertex(k, xy, z));
+        if n == 4 {
             // a quad: the triangles (0, 1, 2) and (0, 3, 2), each corner made once
-            let a: [_; 4] = std::array::from_fn(|k| vertex(verts[k], xy(verts[k]), z[k]));
+            let a: [_; 4] = std::array::from_fn(|k| vertex(k, xy(k), z[k]));
             for k in [0, 1, 2, 0, 3, 2] {
                 batch.extend_from_slice(&a[k]);
             }
-        } else if let (Some([n0, n1, n2, n3]), &[v0, v1]) = (quad, verts) {
-            put(v0, n0, z[0]);
-            put(v0, n1, z[0]);
-            put(v1, n2, z[1]);
-            put(v1, n2, z[1]);
-            put(v0, n1, z[0]);
-            put(v1, n3, z[1]);
+        } else if let Some([n0, n1, n2, n3]) = quad {
+            put(0, n0, z[0]);
+            put(0, n1, z[0]);
+            put(1, n2, z[1]);
+            put(1, n2, z[1]);
+            put(0, n1, z[0]);
+            put(1, n3, z[1]);
         } else {
-            for (&v, &z) in verts.iter().zip(&z) {
-                put(v, xy(v), z);
+            for (k, &z) in z.iter().enumerate().take(n) {
+                put(k, xy(k), z);
             }
         }
         self.zs = z;
