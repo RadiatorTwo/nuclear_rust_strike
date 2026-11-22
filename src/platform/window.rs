@@ -32,6 +32,8 @@ pub enum Input {
     Focus(bool),
     /// scripted only: a dword written to guest memory (address, value)
     Poke(u32, u32),
+    /// a gamepad control pressed (only while our menu is open)
+    Pad(super::gamepad::Control),
 }
 
 struct App {
@@ -172,6 +174,10 @@ pub fn pump(wait: Duration) {
         let _ = h.event_loop.pump_app_events(Some(wait), &mut h.app);
         h.app.catch_cursor();
         scripted(&mut h.app);
+        // the pad's presses work our menu while it is open (the game gets none then)
+        for c in super::gamepad::poll(h.app.menu.is_some()) {
+            h.app.push(Input::Pad(c));
+        }
         h.app.catch_cursor();
     });
 }
@@ -788,10 +794,10 @@ impl App {
     /// it). Keys and buttons going up, the focus and the close button still reach the game:
     /// nothing stays held.
     fn push(&mut self, i: Input) {
-        use super::menu::{Action, Menu, KEY, KEY_FX};
+        use super::menu::{Action, Menu, KEY, KEY_FX, KEY_PAD};
         let full = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
         let Some(menu) = &mut self.menu else {
-            if let Input::Key { vk: key @ (KEY | KEY_FX), down: true, repeat: false, .. } = i {
+            if let Input::Key { vk: key @ (KEY | KEY_FX | KEY_PAD), down: true, repeat: false, .. } = i {
                 let display = self.window.as_ref().and_then(|w| w.current_monitor()).map_or((1280, 960), |m| (m.size().width, m.size().height));
                 self.menu = Some(Menu::open(key, display, full));
                 self.show_menu();

@@ -1,10 +1,11 @@
-//! DirectInput 5: the system keyboard and mouse (joysticks: none yet). The interfaces follow
-//! future_rust_cop's (which had joysticks only).
+//! DirectInput 5: the system keyboard and mouse (no joystick: gamepads are ours, `gamepad.rs`).
+//! The interfaces follow future_rust_cop's (which had joysticks only).
 //!
 //! Keys and buttons come from `user32::poll` (`key`, `button`), mouse motion from the window
 //! system's raw motion (`motion`): DirectInput's mouse is relative. Both are read as a state
 //! (GetDeviceState: 256 key bytes; DIMOUSESTATE) or as buffered events (GetDeviceData:
-//! DIDEVICEOBJECTDATA, after SetProperty(DIPROP_BUFFERSIZE)).
+//! DIDEVICEOBJECTDATA, after SetProperty(DIPROP_BUFFERSIZE)). The keys the gamepad presses
+//! (`pad_keys`) are held in the keyboard's state besides the real ones.
 //! `NSTRIKE_DI_LOG=1` logs what the game asks.
 
 use super::{Import, alloc, arg, free, guest_call, log, mem};
@@ -58,6 +59,9 @@ struct State {
     dy: i32,
     dz: i32,
     buttons: [u8; 4],
+    /// keys the gamepad holds, and those it pressed since the last read (a short press counts)
+    pad: [u8; 256],
+    pad_pressed: [u8; 256],
     /// buffered events per device: (offset, data, time)
     events: [VecDeque<(u32, u32, u32)>; 2],
     sequence: u32,
@@ -69,6 +73,8 @@ static INPUT: Mutex<State> = Mutex::new(State {
     dy: 0,
     dz: 0,
     buttons: [0; 4],
+    pad: [0; 256],
+    pad_pressed: [0; 256],
     events: [VecDeque::new(), VecDeque::new()],
     sequence: 0,
 });
@@ -101,6 +107,15 @@ pub fn key(dik: u8, down: bool) {
         s.keys[dik as usize] = v;
         push(&mut s, KEYBOARD, dik as u32, v as u32);
     }
+}
+
+/// The keys the gamepad holds now (DIK codes, 0x80 held).
+pub fn pad_keys(keys: &[u8; 256]) {
+    let mut s = INPUT.lock().unwrap();
+    for k in 0..256 {
+        s.pad_pressed[k] |= keys[k];
+    }
+    s.pad = *keys;
 }
 
 /// Let every key go (the window lost the focus).
@@ -329,7 +344,12 @@ fn get_device_state(c: &mut Cpu) -> u32 {
     let mut s = INPUT.lock().unwrap();
     if kind_of(d) == KEYBOARD {
         let n = size.min(256);
-        m.slice(out, n).copy_from_slice(&s.keys[..n]);
+        let mut keys = s.keys;
+        for k in 0..256 {
+            keys[k] |= s.pad[k] | s.pad_pressed[k];
+        }
+        s.pad_pressed = [0; 256];
+        m.slice(out, n).copy_from_slice(&keys[..n]);
     } else {
         let mut st = [0u8; 16];
         st[0..4].copy_from_slice(&s.dx.to_le_bytes());

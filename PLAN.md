@@ -30,7 +30,21 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 - [x] SuspendThread/ResumeThread: the game suspends its game thread when its window loses the
       focus (WM_ACTIVATEAPP 0, now sent; the window is not minimised)
 - [x] Thread priorities: the turn goes to the waiting thread with the highest priority
-- [ ] Joysticks in DirectInput
+- [x] Joysticks in DirectInput: a gamepad through gilrs as the game's joystick (2026-11-22);
+      replaced by our own gamepad layer (below): the game's joystick knew X/Y and buttons only
+- [x] Modern gamepad (`gamepad.rs`, as future_rust_cop's, decided 2026-11-22):
+  - [x] 1. Own bindings (`gamepad.toml`): any pad control (buttons, triggers, D-pad, both
+        sticks' directions) for any action, beside the keyboard; modern default layout.
+        Digital actions press the key the game's keyboard binding has (its own edge and repeat
+        logic in every context); the joystick device is gone
+  - [x] 2. Analog: Controller_ProcessInput_ 0x446a6c hooked, movement state variables (0..255:
+        forward 0x51e43c, reverse 0x51e454, turn 0x51e46c / 0x51e434, jink 0x51e45c /
+        0x51e464, full scale at +2) take the stick's amount (the chopper scales by it, 0x41da50)
+  - [x] 3. Bindings page in our overlay menu (F12)
+  - [x] 4. Menus by pad: outside flying (the head context not the mission's [0x51e3f0] /
+        [0x51e3f4]) D-pad / left stick are arrows, A Enter, B Esc (front end, SMFD, message
+        boxes all read the DirectInput keyboard)
+        (all four tested by the user 2026-11-22)
 
 ### 2. Sound
 - [x] Miles: samples and timers (not checked by ear yet)
@@ -162,7 +176,7 @@ Updated 2026-11-08. Details on how things work: CLAUDE.md.
 
 ### 4. Later
 - [x] Videos (`videos.res`)
-- [ ] Gamepads, Linux
+- [ ] Linux
 - [ ] Unsupported instructions in discovered code (Aas 204, Iretd 15, Les 6, ...): mostly data
       decoded as code? Check which functions they are in, and whether any runs
 - [ ] Differential test against Unicorn (future_rust_cop's `src/bin/difftest.rs`)

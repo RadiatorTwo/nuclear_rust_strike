@@ -29,9 +29,10 @@ fn run() -> u32 {
         std::process::exit(2)
     });
     let mut img = Image::load(&exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
-    for &(addr, old, new) in nstrike::platform::PATCHES {
+    for &(addr, old, new) in nstrike::platform::PATCHES.iter().copied().flatten() {
         img.patch(addr, old, new).unwrap_or_else(|e| panic!("{e}"));
     }
+    nstrike::platform::gamepad::start(); // gamepads are found while we compile
     let t = Instant::now();
     let ranges = nstrike::cv::functions(&nstrike::cv::publics(&img.data), TEXT_END);
     let mut code = Code::new(&img);

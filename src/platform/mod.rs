@@ -16,6 +16,7 @@ pub mod zbuffer;
 pub mod shadows;
 pub mod ddraw;
 pub mod dinput;
+pub mod gamepad;
 pub mod dsound;
 pub mod frames;
 pub mod gdi32;
@@ -922,12 +923,13 @@ fn find_import(dll: &str, name: &str) -> Option<&'static Import> {
 
 /// Game functions replaced by our own (`jit::compile`).
 /// Changes to the game's code before it is compiled: (address, its bytes, the new ones).
-pub const PATCHES: &[(u32, &[u8], &[u8])] = wide::PATCHES;
+pub const PATCHES: &[&[(u32, &[u8], &[u8])]] = &[wide::PATCHES];
 
 pub const HOOKS: &[(u32, crate::rt::Hook)] = &[(SELECTOR_FROM_LINEAR, selector_from_linear), (glide::COPY_BITMAP, glide::copy_bitmap),
     (frames::UPDATE_TICK, frames::update_tick),
     (frames::AUTOPILOT, frames::autopilot),
     (dinput::ATTACH_CONTEXT, dinput::attach_context),
+    (gamepad::PROCESS_INPUT, gamepad::process_input),
     (dinput::DETACH_CONTEXT, dinput::detach_context),
     (dinput::SEND_HOOK_UP, dinput::send_hook_up),
     (dinput::HOOK_STATES, dinput::hook_states),

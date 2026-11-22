@@ -105,6 +105,29 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   1); WM_ACTIVATEAPP 1 resumes it. Its ShowWindow(SW_MINIMIZE) is ignored.
 - `dinput.rs` (new): system keyboard (DIK codes from `user32::poll`) and mouse (raw motion
   from winit's DeviceEvent), GetDeviceState and buffered GetDeviceData. `NSTRIKE_DI_LOG=1`.
+  The keys a gamepad presses (`pad_keys`) are held in the keyboard's state too (no joystick
+  device: a DirectInput joystick knew X/Y and buttons only, used with the game's check box).
+- `gamepad.rs` (new, 2026-11-22, as future_rust_cop's): gilrs (started in main.rs before
+  compiling, polled in `window::pump`), first pad; bindings in `game_files/gamepad.toml`
+  (`action = controls`, any button, trigger, D-pad, stick direction; written with the
+  defaults at the first start; modern twin-stick defaults). The game's controller: a thread
+  reads the devices every 5 ms into a record, Controller_ProcessInput_ 0x446a6c runs the
+  attached contexts' criteria (list at controller [0x51e408] +0xf5, newest first; mission
+  [0x51e3f0]/[0x51e3f4], global [0x51e3e0], front end [0x51e3e4], message box [0x51e404])
+  into state variables (i16 value, i16 full scale, ...) and commands. Digital actions press
+  the key of the game's keyboard binding for the command (table [0x4e8608], 11-byte entries
+  u16 command, u16 key; commands: 8 chain gun Space, 7 Hydra X, 9 Hellfire Z, 0xa wingtip C,
+  0x10 set target LShift, 0x12 cargo D, 0x2c SMFD Enter, 0x17 HUD H, 0x16 camera NumEnter,
+  0x1a radar zoom RShift, 0x1b pause P, 0x15 Esc): the game's own edges and repeats. Movement
+  is analog: Controller_ProcessInput_ hooked, after it our amount * 255 goes into the state
+  variables where larger (forward 0x51e43c, reverse 0x51e454, turn 0x51e46c / 0x51e434, jink
+  0x51e45c / 0x51e464; +2 full scale 255): the chopper's motion 0x41da50 scales by them.
+  Outside flying (newest context but the global one not the mission's) fixed menu keys:
+  D-pad / left stick arrows, A Enter, B / Start Esc, X Tab. Our menu's F12 page binds
+  (`menu.rs` Row::Bind: Enter / A waits for a pad control, which is added or removed and taken
+  from other actions, Delete / X unbinds, "Default bindings"); while our menu is open the pad
+  holds no game key and its presses come as `window::Input::Pad` (arrows, A, B / Start).
+  `NSTRIKE_PAD_LOG=1`.
 - `miles.rs` (new): AIL_* on the dsound mixer (`dsound::Sample`: linear gain, signed 8-bit,
   loop counts; double buffering through `dsound::sample_queue`: speech, waited for); the driver's +0x4c is an IDirectSound (the movie player uses it); timers
   are threads calling `callback(user)`. MIDI (`midi.rs`, 2026-11-08): the game's sequencer
@@ -244,6 +267,16 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   a short path when every vertex has one z, and `render.rs`'s quads go to `Glide::add` as one
   `glide::Call::Quad` (corners, depth and state once for both triangles; the depth's
   reference, the depth buffer's fill and the s, t box are the quad's, not each triangle's).
+  Then (2026-11-13, A/B ~468 -> ~488 fps): `ao::Points` takes the hash's top bits (bits 8..
+  of the product depend on x and y's low 7 bits only: points 16 pixels apart in y shared a
+  slot), the lookup rounds inline (round() was a call), `Glide::add` reads each corner once
+  (s, t with the division were read twice, x, y up to three times) and divides only when oow
+  is not 1, `depth_near` searches the 2 x 2 cells its reach touches (not 3 x 3). Left of ours,
+  spread thin: `Glide::add` ~9% (guest memory reads of the GrVertex), the lookup ~4% (the
+  table's loads), `depth_near` ~2.5%, `ao::point` ~2.5%. Profiling: llvm-objdump and
+  llvm-symbolizer are in `C:\Program Files\LLVM\bin`; the raw samples (only the last 2 s)
+  against the link map give a function's hot offsets. A/B: runs of one build differ by the
+  intro's skip (the mission starts seconds apart): compare from the mission's start.
 - Speed (mission ~330 -> ~415 fps unlimited, 2026-11-07): the renderer runs x87 with control
   word 0xc7f (24 bits, truncating). `lift/x87.rs` `round24` rounds those results inline (the
   double result cut to 24 bits; when it lies right on a 24-bit number or a middle, the error's
@@ -267,16 +300,6 @@ Left out: FCop's dialogs (`dialog/`), gamepads, cheats, recording, display setti
   switch). `rt_fpu_round` runs with the default rounding itself. Not in such runs: fldcw,
   helpers, fild qword. A float store beyond a float's range under 0xc7f gives the largest
   float (the FPU's masked overflow), not infinity (`rt_fpu_round` gave infinity before). `rt_lookup` (indirect calls) reads a dense table over the code;
-  Then (2026-11-13, A/B ~468 -> ~488 fps): `ao::Points` takes the hash's top bits (bits 8..
-  of the product depend on x and y's low 7 bits only: points 16 pixels apart in y shared a
-  slot), the lookup rounds inline (round() was a call), `Glide::add` reads each corner once
-  (s, t with the division were read twice, x, y up to three times) and divides only when oow
-  is not 1, `depth_near` searches the 2 x 2 cells its reach touches (not 3 x 3). Left of ours,
-  spread thin: `Glide::add` ~9% (guest memory reads of the GrVertex), the lookup ~4% (the
-  table's loads), `depth_near` ~2.5%, `ao::point` ~2.5%. Profiling: llvm-objdump and
-  llvm-symbolizer are in `C:\Program Files\LLVM\bin`; the raw samples (only the last 2 s)
-  against the link map give a function's hot offsets. A/B: runs of one build differ by the
-  intro's skip (the mission starts seconds apart): compare from the mission's start.
   thunk addresses miss at once. Glide imports that never wait keep the turn (`SLOW_GLIDE`
   lists those that give it up). A thread keeps the turn at loop heads for `SLICE` (0.5 ms,
   `tsc`): the game and controller threads traded it 60 000 times a second.

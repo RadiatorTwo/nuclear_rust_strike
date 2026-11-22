@@ -1,11 +1,13 @@
 //! The port's own menu (F10): its settings (`settings.rs`), drawn into the window's overlay
-//! over the game. The game's own settings stay in its Config menu.
+//! over the game. The game's own settings stay in its Config menu. F11 its effects, F12 the
+//! gamepad's bindings (`gamepad.rs`). A pad works the menu too (`Input::Pad`).
 //!
 //! It lives on the window's thread (`window.rs` owns a `Menu` while it is open and hands it
 //! the input; the game gets none of it, but for keys and buttons going up). Changes are used
 //! at once and saved. While it is open a mission stands still (`frames.rs`: `wait_closed`).
 
 use super::font::{FIRST, GLYPHS};
+use super::gamepad::{self, Control};
 use super::window::Input;
 use crate::settings::{self, FrameRate};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +17,11 @@ use std::time::{Duration, Instant};
 pub const W: i32 = 640;
 pub const H: i32 = 480;
 
-/// The keys that open and close the menu: F10 its settings page, F11 its effects page.
+/// The keys that open and close the menu: F10 its settings page, F11 its effects page, F12
+/// the gamepad's.
 pub const KEY: u8 = 0x79;
 pub const KEY_FX: u8 = 0x7a;
+pub const KEY_PAD: u8 = 0x7b;
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -78,12 +82,25 @@ enum Row {
     Heat,
     Particles,
     Depth,
+    /// a gamepad action (`gamepad::ACTIONS`)
+    Bind(usize),
+    Reset,
     Close,
 }
 
 /// The settings page (F10) and the effects page (F11: the modern graphics effects).
 const SETTINGS: &[Row] = &[Row::Fullscreen, Row::Window, Row::FrameRate, Row::Vsync, Row::Msaa, Row::Filter, Row::Wide, Row::Close];
 const EFFECTS: &[Row] = &[Row::Depth, Row::Ao, Row::Lights, Row::LitSmoke, Row::Shadows, Row::ShadowQuality, Row::Bloom, Row::Heat, Row::Particles, Row::Close];
+const PAD: &[Row] = &{
+    let mut r = [Row::Close; gamepad::ACTIONS.len() + 2];
+    let mut k = 0;
+    while k < gamepad::ACTIONS.len() {
+        r[k] = Row::Bind(k);
+        k += 1;
+    }
+    r[k] = Row::Reset;
+    r
+};
 
 pub struct Menu {
     /// the page's rows: `SETTINGS` or `EFFECTS`
@@ -97,13 +114,15 @@ pub struct Menu {
     display: (u32, u32),
     /// the window is fullscreen (Alt+Enter changes it too)
     pub fullscreen: bool,
+    /// the gamepad action waiting for a control to be pressed
+    capture: Option<usize>,
 }
 
 impl Menu {
     /// Opened by `key` (KEY or KEY_FX: its page).
     pub fn open(key: u8, display: (u32, u32), fullscreen: bool) -> Menu {
         OPEN.store(true, Ordering::Relaxed);
-        Menu { rows: page(key), sel: 0, hot: None, mouse: (-1, -1), display, fullscreen }
+        Menu { rows: page(key), sel: 0, hot: None, mouse: (-1, -1), display, fullscreen, capture: None }
     }
 
     /// The window sizes offered (None: the default), with the one in effect.
@@ -158,7 +177,7 @@ impl Menu {
             Row::Heat => (vec!["Off".into(), "On".into()], s.heat_shimmer as usize),
             Row::Particles => (vec!["Off".into(), "On".into()], s.particles as usize),
             Row::Depth => (vec!["Off".into(), "On".into()], s.depth_buffer as usize),
-            Row::Close => (Vec::new(), 0),
+            Row::Bind(_) | Row::Reset | Row::Close => (Vec::new(), 0),
         }
     }
 
@@ -194,47 +213,94 @@ impl Menu {
             Row::Heat => super::heat::set_enabled(k == 1),
             Row::Particles => super::particles::set_enabled(k == 1),
             Row::Depth => super::zbuffer::set_enabled(k == 1),
-            Row::Close => {}
+            Row::Bind(_) | Row::Reset | Row::Close => {}
         }
         None
+    }
+
+    /// Enter (or a click, or A) on a row: Close closes, Reset the pad's defaults, a binding row
+    /// waits for a pad control, the others go to the next choice.
+    fn enter(&mut self, k: usize, out: &mut Vec<Action>) -> Result<(), ()> {
+        self.sel = k;
+        match self.rows[k] {
+            Row::Close => return self.close(),
+            Row::Reset => gamepad::reset(),
+            Row::Bind(a) => self.capture = Some(a),
+            r => out.extend(self.change(r, 1)),
+        }
+        Ok(())
+    }
+
+    /// A pad control while open: bound while a binding waits for one, else the arrows, Enter,
+    /// Escape and (X) unbinding.
+    fn pad(&mut self, c: Control, out: &mut Vec<Action>) -> Result<(), ()> {
+        if let Some(a) = self.capture.take() {
+            gamepad::toggle(a, c);
+            return Ok(());
+        }
+        let n = self.rows.len();
+        match c {
+            Control::DUp | Control::LUp => self.sel = (self.sel + n - 1) % n,
+            Control::DDown | Control::LDown => self.sel = (self.sel + 1) % n,
+            Control::DLeft | Control::LLeft => out.extend(self.change(self.rows[self.sel], -1)),
+            Control::DRight | Control::LRight => out.extend(self.change(self.rows[self.sel], 1)),
+            Control::A => return self.enter(self.sel, out),
+            Control::B | Control::Start => return self.close(),
+            Control::X => self.unbind(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn unbind(&mut self) {
+        if let Row::Bind(a) = self.rows[self.sel] {
+            gamepad::clear(a);
+        }
     }
 
     /// Input while open (a move in overlay pixels): `Err(())` closes the menu. The actions are
     /// the window's to do.
     pub fn input(&mut self, i: &Input, out: &mut Vec<Action>) -> Result<(), ()> {
+        if let Input::Pad(c) = *i {
+            return self.pad(c, out);
+        }
+        // a binding waiting for a pad control: a key or a click gives up
+        if self.capture.is_some() {
+            if let Input::Key { down: true, .. } | Input::Button(_, true) = i {
+                self.capture = None;
+            }
+            return Ok(());
+        }
         match *i {
-            // its page's key closes it, the other's turns to that page
-            Input::Key { vk: k @ (KEY | KEY_FX), down: true, .. } if page(k) != self.rows => {
+            // its page's key closes it, another's turns to that page
+            Input::Key { vk: k @ (KEY | KEY_FX | KEY_PAD), down: true, .. } if page(k) != self.rows => {
                 self.rows = page(k);
                 self.sel = 0;
                 self.hot = None;
             }
             Input::Key { vk, down: true, .. } => match vk {
-                KEY | KEY_FX | 0x1b => return self.close(),
+                KEY | KEY_FX | KEY_PAD | 0x1b => return self.close(),
                 0x26 => self.sel = (self.sel + self.rows.len() - 1) % self.rows.len(),
                 0x28 | 0x09 => self.sel = (self.sel + 1) % self.rows.len(),
                 0x25 => out.extend(self.change(self.rows[self.sel], -1)),
                 0x27 => out.extend(self.change(self.rows[self.sel], 1)),
-                0x0d | 0x20 => {
-                    if self.rows[self.sel] == Row::Close {
-                        return self.close();
-                    }
-                    out.extend(self.change(self.rows[self.sel], 1));
-                }
+                0x0d | 0x20 => return self.enter(self.sel, out),
+                // Delete, Backspace
+                0x2e | 0x08 => self.unbind(),
                 _ => {}
             },
             Input::Move(x, y) => {
                 self.mouse = (x, y);
-                self.hot = row_at(self.rows.len(), x, y).map(|(k, _)| k);
+                self.hot = row_at(self.rows, x, y).map(|(k, _)| k);
             }
             // a click on a row's value: on its left half back, else on
             Input::Button(0, true) => {
-                if let Some((k, left)) = row_at(self.rows.len(), self.mouse.0, self.mouse.1) {
+                if let Some((k, left)) = row_at(self.rows, self.mouse.0, self.mouse.1) {
                     self.sel = k;
-                    if self.rows[k] == Row::Close {
-                        return self.close();
+                    match self.rows[k] {
+                        Row::Close | Row::Reset | Row::Bind(_) => return self.enter(k, out),
+                        r => out.extend(self.change(r, if left { -1 } else { 1 })),
                     }
-                    out.extend(self.change(self.rows[k], if left { -1 } else { 1 }));
                 }
             }
             Input::Wheel(n) => out.extend(self.change(self.rows[self.sel], n.signum())),
@@ -252,17 +318,25 @@ impl Menu {
     /// The menu as ARGB pixels, W x H.
     pub fn render(&self) -> Vec<u32> {
         let mut cv = Canvas { px: vec![DIM; (W * H) as usize] };
-        let n = self.rows.len();
-        let p = panel(n);
+        let rows = self.rows;
+        let p = panel(rows);
+        let small = rows == PAD;
+        let scale = if small { 1 } else { 2 };
         cv.fill(p, PANEL);
         cv.frame(p, EDGE_HI);
         cv.frame(inset(p, 1), EDGE);
         let bar = [p[0] + 2, p[1] + 2, p[2] - 2, p[1] + 20];
         cv.fill(bar, CAPTION);
-        let title = if self.rows == EFFECTS { "NSTRIKE EFFECTS" } else { "NSTRIKE SETTINGS" };
+        let title = if rows == EFFECTS {
+            "NSTRIKE EFFECTS"
+        } else if small {
+            "NSTRIKE GAMEPAD"
+        } else {
+            "NSTRIKE SETTINGS"
+        };
         cv.label(bar, title, TEXT, 1, 2);
-        for (k, &r) in self.rows.iter().enumerate() {
-            let rr = row_rect(n, k);
+        for (k, &r) in rows.iter().enumerate() {
+            let rr = row_rect(rows, k);
             let sel = k == self.sel;
             if sel || self.hot == Some(k) {
                 cv.fill(rr, if sel { FACE_HOT } else { FACE });
@@ -270,9 +344,28 @@ impl Menu {
             if sel {
                 cv.frame(rr, EDGE_HI);
             }
-            if r == Row::Close {
-                cv.label(rr, "Close", TEXT, 1, 2);
-                continue;
+            match r {
+                Row::Close => {
+                    cv.label(rr, "Close", TEXT, 1, scale);
+                    continue;
+                }
+                Row::Reset => {
+                    cv.label(rr, "Default bindings", TEXT, 1, scale);
+                    continue;
+                }
+                Row::Bind(a) => {
+                    cv.label([rr[0] + 12, rr[1], rr[2], rr[3]], gamepad::ACTIONS[a].label, TEXT, 0, 1);
+                    let waiting = self.capture == Some(a);
+                    let text = if waiting {
+                        "Press a control...".to_string()
+                    } else {
+                        let c: Vec<&str> = gamepad::binding(a).iter().map(|c| c.name()).collect();
+                        if c.is_empty() { "-".to_string() } else { c.join(", ") }
+                    };
+                    cv.label([rr[0] + 200, rr[1], rr[2] - 10, rr[3]], &text, if waiting { MARK } else { TEXT }, 0, 1);
+                    continue;
+                }
+                _ => {}
             }
             let name = match r {
                 Row::Fullscreen => "Fullscreen",
@@ -291,7 +384,7 @@ impl Menu {
                 Row::Heat => "Heat shimmer",
                 Row::Particles => "Particles",
                 Row::Depth => "Depth buffer",
-                Row::Close => unreachable!(),
+                Row::Bind(_) | Row::Reset | Row::Close => unreachable!(),
             };
             cv.label([rr[0] + 12, rr[1], rr[2], rr[3]], name, TEXT, 0, 2);
             let (c, i) = self.choices(r);
@@ -314,6 +407,8 @@ impl Menu {
             Row::Heat => "The air wavers above fire and explosions",
             Row::Particles => "Sparks and debris fly from explosions",
             Row::Depth => "Fixes triangles drawn in front of nearer ones",
+            Row::Bind(_) if self.capture.is_some() => "Press a pad control to add it (again: remove); a key gives up",
+            Row::Bind(_) => "Enter / A: add or remove a control   Delete / X: none",
             Row::ShadowQuality => match settings::get().shadow_quality {
                 settings::ShadowQuality::Low => "Fastest; things at the screen's edge may lose theirs",
                 settings::ShadowQuality::Mid => "Everything around casts; soft edges",
@@ -323,7 +418,7 @@ impl Menu {
             _ => "",
         };
         cv.label([p[0], p[3] - 46, p[2], p[3] - 30], note, TEXT_OFF, 1, 1);
-        cv.label([p[0], p[3] - 26, p[2], p[3] - 8], "Arrows: choose and change   F10 settings   F11 effects   Esc: close", TEXT_OFF, 1, 1);
+        cv.label([p[0], p[3] - 26, p[2], p[3] - 8], "Arrows: choose and change   F10 settings   F11 effects   F12 gamepad   Esc: close", TEXT_OFF, 1, 1);
         cv.px
     }
 }
@@ -348,25 +443,33 @@ fn rate_text(r: FrameRate) -> String {
 }
 
 // Layout (overlay pixels).
-const ROW_H: i32 = 30;
 const PANEL_W: i32 = 520;
+
+/// A page's row height with the gap below: the gamepad's has many rows, in small text.
+fn row_h(rows: &[Row]) -> i32 {
+    if rows == PAD { 17 } else { 34 }
+}
 
 /// The page a key opens.
 fn page(key: u8) -> &'static [Row] {
-    if key == KEY_FX { EFFECTS } else { SETTINGS }
+    match key {
+        KEY_FX => EFFECTS,
+        KEY_PAD => PAD,
+        _ => SETTINGS,
+    }
 }
 
-/// The panel for `n` rows.
-fn panel(n: usize) -> [i32; 4] {
-    let h = 30 + n as i32 * (ROW_H + 4) + 60;
+/// The panel for a page's rows.
+fn panel(rows: &[Row]) -> [i32; 4] {
+    let h = 30 + rows.len() as i32 * row_h(rows) + 60;
     let (x, y) = ((W - PANEL_W) / 2, (H - h) / 2);
     [x, y, x + PANEL_W, y + h]
 }
 
-fn row_rect(n: usize, k: usize) -> [i32; 4] {
-    let p = panel(n);
-    let y = p[1] + 30 + k as i32 * (ROW_H + 4);
-    [p[0] + 10, y, p[2] - 10, y + ROW_H]
+fn row_rect(rows: &[Row], k: usize) -> [i32; 4] {
+    let p = panel(rows);
+    let y = p[1] + 30 + k as i32 * row_h(rows);
+    [p[0] + 10, y, p[2] - 10, y + row_h(rows) - 4]
 }
 
 fn value_rect(r: [i32; 4]) -> [i32; 4] {
@@ -374,9 +477,9 @@ fn value_rect(r: [i32; 4]) -> [i32; 4] {
 }
 
 /// The row at overlay pixel (x, y), and whether it is on the left half of its value.
-fn row_at(n: usize, x: i32, y: i32) -> Option<(usize, bool)> {
-    (0..n).find_map(|k| {
-        let r = row_rect(n, k);
+fn row_at(rows: &[Row], x: i32, y: i32) -> Option<(usize, bool)> {
+    (0..rows.len()).find_map(|k| {
+        let r = row_rect(rows, k);
         let v = value_rect(r);
         (x >= r[0] && x < r[2] && y >= r[1] && y < r[3]).then_some((k, x < (v[0] + v[2]) / 2))
     })

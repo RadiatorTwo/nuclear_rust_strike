@@ -207,7 +207,7 @@ fn poll(wait: Duration) {
                     s.queue.push_back(m(WM_ACTIVATEAPP, 1, 0));
                 }
             }
-            Input::Poke(..) => {}
+            Input::Poke(..) | Input::Pad(_) => {}
         }
     }
     let now = super::kernel32::ms_since_start();
